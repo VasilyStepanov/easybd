@@ -34,7 +34,7 @@ public:
     std::unique_ptr<RecvStream> recv_stream(
         int fd, size_t entry_size, unsigned int entries) override;
     void cancel_fd(int fd) override;
-    void run() override;
+    void run(int timeout_ms = -1) override;
     void stop() override;
 
     // Internal API for the SqeAwaiter/RecvStreamImpl helper classes defined

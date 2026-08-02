@@ -2,7 +2,7 @@ AC_PREREQ([2.71])
 AC_INIT([easybd], [0.1.0], [])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
-AM_INIT_AUTOMAKE([foreign subdir-objects -Wall -Werror])
+AM_INIT_AUTOMAKE([foreign -Wall -Werror])
 AM_SILENT_RULES([yes])
 
 AC_PROG_CC
@@ -39,6 +39,7 @@ AC_CONFIG_FILES([
     easyio/Makefile
     easyio/src/Makefile
     easyio/tests/Makefile
+    server/Makefile
 ])
 
 AC_OUTPUT

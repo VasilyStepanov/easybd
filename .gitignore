@@ -67,6 +67,7 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+.scratch/
 
 # Autotools generated files (run ./autogen.sh && ./configure to regenerate)
 /configure
@@ -86,3 +87,4 @@ Makefile.in
 *.test
 test-suite.log
 /easyio/tests/test_all
+/server/easybd-server

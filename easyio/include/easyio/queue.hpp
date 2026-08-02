@@ -85,12 +85,17 @@ public:
     virtual void cancel_fd(int fd) = 0;
 
     // Pumps completions, resuming coroutines as their operations finish.
-    // Blocks the calling thread when there is nothing ready. Returns when
-    // stop() has been called, when a signal interrupts the wait (so a
-    // signal handler that just sets a flag can still get run() to return
-    // promptly -- the caller decides whether to call run() again), or on
-    // an unrecoverable error (thrown).
-    virtual void run() = 0;
+    // Blocks the calling thread when there is nothing ready, for at most
+    // timeout_ms (a negative value, the default, blocks indefinitely).
+    // Returns when stop() has been called, when timeout_ms elapses with
+    // nothing to do, or when a signal interrupts the wait -- these three
+    // cases are otherwise indistinguishable to the caller by design: a
+    // std::atomic<bool> shutdown flag checked between calls, combined with
+    // a bounded timeout_ms, is enough to shut a worker thread down
+    // promptly without any signal-delivery machinery (pthread_kill and
+    // friends) to force a blocking wait to return. Throws on an
+    // unrecoverable error.
+    virtual void run(int timeout_ms = -1) = 0;
 
     // Requests that a currently-running (or future) call to run() return
     // once the current batch of ready completions has been dispatched.

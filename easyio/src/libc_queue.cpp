@@ -206,7 +206,7 @@ void Queue::cancel_fd(int fd) {
     }
 }
 
-void Queue::run() {
+void Queue::run(int timeout_ms) {
     std::vector<pollfd> pfds;
     while (!_stop_requested) {
         pfds.clear();
@@ -224,15 +224,20 @@ void Queue::run() {
             }
         }
 
-        int n = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), -1);
+        int n = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeout_ms);
         if (n < 0) {
             if (errno == EINTR) {
-                // Let the caller decide whether to resume pumping (e.g.
-                // after checking a shutdown flag a signal handler set) --
+                // Let the caller decide whether to resume pumping --
                 // silently retrying here would make run() uninterruptible.
                 return;
             }
             throw_errno(errno, "poll");
+        }
+        if (n == 0) {
+            // timeout_ms elapsed with nothing ready: let the caller decide
+            // whether to call run() again (e.g. after checking a shutdown
+            // flag).
+            return;
         }
 
         for (auto& pfd : pfds) {
@@ -242,8 +247,20 @@ void Queue::run() {
             if (pfd.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
                 auto it = _fds.find(pfd.fd);
                 if (it != _fds.end() && it->second.read_op) {
-                    if (it->second.read_op->on_ready()) {
-                        it->second.read_op = nullptr;
+                    FdOp* op = it->second.read_op;
+                    // on_ready() resumes a coroutine, which may reentrantly
+                    // submit new operations on *other* fds -- e.g. an
+                    // accept completing spawns a handler that registers a
+                    // recv_stream on the new client fd. That's an
+                    // unordered_map insertion, which can rehash and
+                    // invalidate `it` (references/pointers to elements
+                    // survive a rehash, but iterators don't) -- so `it`
+                    // must not be reused afterwards without re-finding it.
+                    if (op->on_ready()) {
+                        it = _fds.find(pfd.fd);
+                        if (it != _fds.end() && it->second.read_op == op) {
+                            it->second.read_op = nullptr;
+                        }
                     }
                 }
             }
@@ -253,10 +270,17 @@ void Queue::run() {
                     if (it == _fds.end() || it->second.write_queue.empty()) {
                         break;
                     }
-                    if (!it->second.write_queue.front()->on_ready()) {
+                    FdOp* op = it->second.write_queue.front();
+                    if (!op->on_ready()) {
                         break;
                     }
-                    it->second.write_queue.pop_front();
+                    // Same reentrancy hazard as above: re-find rather than
+                    // reuse `it` across the on_ready() call.
+                    it = _fds.find(pfd.fd);
+                    if (it != _fds.end() && !it->second.write_queue.empty() &&
+                        it->second.write_queue.front() == op) {
+                        it->second.write_queue.pop_front();
+                    }
                 }
             }
             auto it = _fds.find(pfd.fd);

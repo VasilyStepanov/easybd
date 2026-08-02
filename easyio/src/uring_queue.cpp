@@ -84,13 +84,29 @@ void Queue::_dispatch() {
     io_uring_cq_advance(&_ring, nr);
 }
 
-void Queue::run() {
+void Queue::run(int timeout_ms) {
     while (!_stop_requested) {
-        int ret = io_uring_submit_and_wait(&_ring, 1);
+        int ret;
+        if (timeout_ms < 0) {
+            ret = io_uring_submit_and_wait(&_ring, 1);
+        } else {
+            __kernel_timespec ts{};
+            ts.tv_sec = timeout_ms / 1000;
+            ts.tv_nsec = static_cast<long long>(timeout_ms % 1000) * 1000000LL;
+            io_uring_cqe* cqe = nullptr;
+            ret = io_uring_submit_and_wait_timeout(&_ring, &cqe, 1, &ts, nullptr);
+            if (ret == -ETIME) {
+                // Nothing completed within timeout_ms -- reap anything that
+                // did land right at the boundary, then let the caller
+                // decide whether to call run() again (e.g. after checking
+                // a shutdown flag).
+                _dispatch();
+                return;
+            }
+        }
         if (ret < 0) {
             if (ret == -EINTR) {
-                // Let the caller decide whether to resume pumping (e.g.
-                // after checking a shutdown flag a signal handler set) --
+                // Let the caller decide whether to resume pumping --
                 // silently retrying here would make run() uninterruptible.
                 return;
             }
