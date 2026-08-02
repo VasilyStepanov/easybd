@@ -7,6 +7,7 @@
 
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 
 #include <easyio/recv_stream.hpp>
 #include <easyio/task.hpp>
@@ -81,6 +82,11 @@ public:
 
     virtual Task<size_t> send(int fd, const void* buf, size_t size) = 0;
 
+    // Gathered send: writes iov[0..iovcnt) as a single kernel operation
+    // (::sendmsg / IORING_OP_SENDMSG) instead of one send() per buffer, so a
+    // header-then-payload message costs one syscall/SQE round trip, not two.
+    virtual Task<size_t> sendmsg(int fd, const iovec* iov, int iovcnt) = 0;
+
     // entry_size/entries must be powers of two; total buffer memory used is
     // entry_size * entries. Chunks handed out by the stream reference
     // backend-owned memory that stays valid only until the next next() call
@@ -123,5 +129,12 @@ private:
 // permitting result. Built purely on the public Queue interface, so it's
 // backend-agnostic.
 Task<void> send_all(Queue& queue, int fd, const void* buf, size_t size);
+
+// Sends exactly buf1[0..size1) followed by buf2[0..size2) as a single
+// gathered write (see Queue::sendmsg()), looping over short writes the same
+// way send_all() does. Used for header+payload messages so the two logical
+// pieces cost one syscall/SQE round trip instead of two.
+Task<void> send_all(
+    Queue& queue, int fd, const void* buf1, size_t size1, const void* buf2, size_t size2);
 
 } // namespace easyio

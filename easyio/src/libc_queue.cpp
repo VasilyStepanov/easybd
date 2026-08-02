@@ -157,6 +157,56 @@ private:
     ssize_t _result = 0;
 };
 
+class SendMsgAwaiter final : public FdOp {
+public:
+    SendMsgAwaiter(Queue& queue, int fd, const iovec* iov, int iovcnt)
+        : _queue(queue), _fd(fd), _iov(iov), _iovcnt(iovcnt) {}
+
+    [[nodiscard]] bool await_ready() noexcept { return _try(); }
+    void await_suspend(std::coroutine_handle<> h) noexcept {
+        _handle = h;
+        _queue._push_write_op(_fd, this);
+    }
+    [[nodiscard]] ssize_t await_resume() const noexcept { return _result; }
+
+private:
+    bool _try() noexcept {
+        msghdr msg{};
+        msg.msg_iov = const_cast<iovec*>(_iov);
+        msg.msg_iovlen = static_cast<size_t>(_iovcnt);
+        ssize_t r = ::sendmsg(_fd, &msg, MSG_NOSIGNAL);
+        if (r < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return false;
+            }
+            _result = -errno;
+            return true;
+        }
+        _result = r;
+        return true;
+    }
+
+    bool on_ready() noexcept override {
+        if (!_try()) {
+            return false;
+        }
+        _handle.resume();
+        return true;
+    }
+
+    void cancel() noexcept override {
+        _result = -ECANCELED;
+        _handle.resume();
+    }
+
+    Queue& _queue;
+    int _fd;
+    const iovec* _iov;
+    int _iovcnt;
+    std::coroutine_handle<> _handle;
+    ssize_t _result = 0;
+};
+
 } // namespace
 
 Queue::Queue(unsigned int depth) : easyio::Queue(depth) {}
@@ -336,6 +386,14 @@ Task<size_t> Queue::send(int fd, const void* buf, size_t size) {
     ssize_t res = co_await SendAwaiter(*this, fd, buf, size);
     if (res < 0) {
         throw_errno(static_cast<int>(-res), "send");
+    }
+    co_return static_cast<size_t>(res);
+}
+
+Task<size_t> Queue::sendmsg(int fd, const iovec* iov, int iovcnt) {
+    ssize_t res = co_await SendMsgAwaiter(*this, fd, iov, iovcnt);
+    if (res < 0) {
+        throw_errno(static_cast<int>(-res), "sendmsg");
     }
     co_return static_cast<size_t>(res);
 }
