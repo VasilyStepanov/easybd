@@ -15,16 +15,21 @@ namespace easybd {
 
 namespace {
 
-// recv_stream()'s entries count must be a power of two (see its doc
-// comment) -- queue.depth() is a caller-supplied value (server's
-// --queue-size) with no such guarantee.
-unsigned int round_up_pow2(unsigned int v) {
-    unsigned int p = 1;
-    while (p < v) {
-        p <<= 1;
-    }
-    return p;
-}
+// recv_stream() entries for this connection's requests, independent of
+// queue.depth(): that's the whole worker's underlying SQE/poll capacity
+// (shared across every connection it handles, meant for many small
+// concurrent ops), not a signal for "how many large messages might be in
+// flight on one connection" -- the protocol has no per-connection iodepth
+// to read this off of in the first place. Using queue.depth() directly
+// here was tried and measured worse (round_up_pow2(128) * 4MiB = 512MiB
+// per connection with the default --queue-depth, versus 32MiB here):
+// cycling reads/writes through a needlessly huge buffer region costs more
+// in cache/TLB locality than it ever saves in avoided resubmits. 8 is a
+// plain guess at "probably enough concurrent large messages per
+// connection in practice," not derived from anything -- bump it (or wire
+// up a dedicated CLI knob) if a real workload needs deeper pipelining of
+// near-EASYBD_MAX_PAYLOAD_SIZE requests than that.
+constexpr unsigned int kRecvStreamEntries = 8;
 
 // Used for a request that fails validation before any actual I/O is
 // attempted (currently just an oversized read) -- same response shape as
@@ -94,15 +99,11 @@ easyio::Task<void> handle_connection(
     easyio::Queue& queue, int client_fd, int file_fd, uint64_t /*file_size*/) {
     easyio::set_nonblocking(client_fd);
     easyio::set_tcp_nodelay(client_fd);
-    // See Client::reader_loop()'s recv_stream() call for the sizing
-    // rationale: large (multi-MiB) write request bodies hit the same
-    // ring-refill cost here that large read responses hit on the client
-    // side. queue.depth() is this worker's overall --queue-size, not a
-    // per-connection iodepth (the protocol has no notion of the latter),
-    // but it's the only signal available for "how much concurrent I/O
-    // should this worker be ready for" and scales the same way.
-    auto stream = queue.recv_stream(
-        client_fd, EASYBD_MAX_PAYLOAD_SIZE, round_up_pow2(queue.depth()));
+    // entry_size: see Client::reader_loop()'s recv_stream() call -- large
+    // (multi-MiB) write request bodies hit the same ring-refill cost here
+    // that large read responses hit on the client side. entries: see
+    // kRecvStreamEntries above for why this isn't queue.depth().
+    auto stream = queue.recv_stream(client_fd, EASYBD_MAX_PAYLOAD_SIZE, kRecvStreamEntries);
     easyio::FramedReader reader(*stream);
     easyio::Mutex send_mtx;
     easyio::WaitGroup wg;
