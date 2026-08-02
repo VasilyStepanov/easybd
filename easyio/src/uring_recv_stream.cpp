@@ -156,6 +156,18 @@ public:
         } else if (flags & IORING_CQE_F_BUFFER) {
             unsigned int buf_idx = flags >> IORING_CQE_BUFFER_SHIFT;
             _pending.push_back({buf_idx, static_cast<unsigned int>(res)});
+            if (!more) {
+                // The kernel can fold "ran out of provided buffers" into the
+                // same CQE that delivers the last chunk it *could* still
+                // serve, instead of always following up with a separate
+                // ENOBUFS completion -- same situation as the ENOBUFS case
+                // above (ring's dry, not "connection's done"), just
+                // reported differently. Observed in practice with large
+                // (multi-MB) transfers, where the ring drains faster than
+                // the consumer can be resumed to free slots.
+                enobufs = true;
+                _needs_resubmit = true;
+            }
         } else {
             // res == 0, no buffer selected: orderly shutdown (EOF).
             _eof = true;
