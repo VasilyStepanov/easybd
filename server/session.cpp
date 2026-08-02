@@ -47,6 +47,12 @@ easyio::Task<void> handle_write(
     int64_t res = 0;
     try {
         size_t written = co_await queue.pwrite(file_fd, payload.data(), payload.size(), offset);
+        // A successful pwrite() with O_DIRECT only means the page cache was
+        // bypassed, not that the backing device's own volatile write cache
+        // has been flushed -- without this, res>0 would be lying about
+        // durability. If the flush itself fails, the write cannot be
+        // reported as successful even though the data reached the device.
+        co_await queue.fdatasync(file_fd);
         res = static_cast<int64_t>(written);
     } catch (const std::system_error& e) {
         res = -static_cast<int64_t>(e.code().value());

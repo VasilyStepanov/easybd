@@ -197,6 +197,16 @@ Task<size_t> Queue::pwrite(int fd, const void* buf, size_t size, uint64_t offset
     co_return static_cast<size_t>(res);
 }
 
+Task<void> Queue::fdatasync(int fd) {
+    int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
+        io_uring_prep_fsync(sqe, fd, IORING_FSYNC_DATASYNC);
+    });
+    if (res < 0) {
+        throw_errno(res, "fdatasync");
+    }
+    co_return;
+}
+
 Task<int> Queue::accept(int fd) {
     int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
         io_uring_prep_accept(sqe, fd, nullptr, nullptr, 0);

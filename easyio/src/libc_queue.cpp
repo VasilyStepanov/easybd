@@ -366,6 +366,13 @@ Task<size_t> Queue::pwrite(int fd, const void* buf, size_t size, uint64_t offset
     co_return static_cast<size_t>(r);
 }
 
+Task<void> Queue::fdatasync(int fd) {
+    if (::fdatasync(fd) < 0) {
+        throw_errno(errno, "fdatasync");
+    }
+    co_return;
+}
+
 Task<int> Queue::accept(int fd) {
     int res = co_await AcceptAwaiter(*this, fd);
     if (res < 0) {
