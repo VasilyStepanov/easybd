@@ -19,6 +19,6 @@ namespace easybd {
 // a detached (spawn()ed) task so the reader can immediately go back to
 // parsing the next request without waiting for this one's file I/O.
 easyio::Task<void> handle_connection(
-    easyio::Queue& queue, int client_fd, int file_fd, uint64_t file_size);
+    easyio::Queue& queue, int client_fd, int file_fd, uint64_t file_size, bool multishot_recv);
 
 } // namespace easybd

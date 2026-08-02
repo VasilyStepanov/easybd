@@ -75,9 +75,10 @@ easyio::Task<void> file_roundtrip(easyio::Queue& queue, std::string path) {
     co_await queue.close(fd);
 }
 
-easyio::Task<void> server_echo_one(easyio::Queue& queue, int listen_fd, std::string* out) {
+easyio::Task<void> server_echo_one(
+    easyio::Queue& queue, int listen_fd, std::string* out, bool multishot = true) {
     int client_fd = co_await queue.accept(listen_fd);
-    auto stream = queue.recv_stream(client_fd, 4096, 4);
+    auto stream = queue.recv_stream(client_fd, 4096, 4, multishot);
 
     std::string data;
     for (;;) {
@@ -178,9 +179,9 @@ TEST_P(EasyioTest, SocketSendRecvStream) {
 }
 
 easyio::Task<void> framed_server(
-    easyio::Queue& queue, int listen_fd, std::vector<std::string>* out) {
+    easyio::Queue& queue, int listen_fd, std::vector<std::string>* out, bool multishot = true) {
     int client_fd = co_await queue.accept(listen_fd);
-    auto stream = queue.recv_stream(client_fd, 4096, 4);
+    auto stream = queue.recv_stream(client_fd, 4096, 4, multishot);
     easyio::FramedReader reader(*stream);
 
     std::vector<std::string> messages;
@@ -350,6 +351,71 @@ TEST_P(EasyioTest, MutexSerializesConcurrentSends) {
     std::string b(3000, 'B');
     EXPECT_TRUE(received == a + b || received == b + a)
         << "received.size()=" << received.size();
+    ::close(listen_fd);
+}
+
+// --feature-multishot off is only a distinct code path on the io_uring
+// backend (see queue.hpp's recv_stream() doc comment) -- these two mirror
+// SocketSendRecvStream/FramedReaderExactBoundaries above but force the
+// SingleShotRecvStreamImpl path explicitly, since the parameterized
+// EasyioTest suite above only ever exercises the (default) multishot=true
+// path.
+TEST(EasyioSingleShotRecvStream, SocketSendRecvStream) {
+    if (!easyio::io_uring_available()) {
+        GTEST_SKIP() << "built --without-liburing";
+    }
+    auto queue = easyio::Queue::create(easyio::Backend::IoUring, 32);
+
+    uint16_t port = 0;
+    int listen_fd = make_listen_socket(&port);
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    easyio::set_nonblocking(client_fd);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    std::string received;
+    std::string message(70000, 'x'); // forces several resubmit cycles
+
+    run_pair(
+        *queue, server_echo_one(*queue, listen_fd, &received, /*multishot=*/false),
+        client_send_one(*queue, client_fd, addr, message));
+
+    ASSERT_EQ(received.size(), message.size());
+    EXPECT_EQ(received, message);
+    ::close(listen_fd);
+}
+
+TEST(EasyioSingleShotRecvStream, FramedReaderExactBoundaries) {
+    if (!easyio::io_uring_available()) {
+        GTEST_SKIP() << "built --without-liburing";
+    }
+    auto queue = easyio::Queue::create(easyio::Backend::IoUring, 32);
+
+    uint16_t port = 0;
+    int listen_fd = make_listen_socket(&port);
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    easyio::set_nonblocking(client_fd);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    std::vector<std::string> expected{"a", "hello world", std::string(5000, 'z'), "", "last"};
+    std::vector<std::string> received;
+
+    run_pair(
+        *queue, framed_server(*queue, listen_fd, &received, /*multishot=*/false),
+        framed_client(*queue, client_fd, addr, expected));
+
+    EXPECT_EQ(received, expected);
     ::close(listen_fd);
 }
 

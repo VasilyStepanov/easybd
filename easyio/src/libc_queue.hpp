@@ -46,7 +46,7 @@ public:
     Task<size_t> send(int fd, const void* buf, size_t size) override;
     Task<size_t> sendmsg(int fd, const iovec* iov, int iovcnt) override;
     std::unique_ptr<RecvStream> recv_stream(
-        int fd, size_t entry_size, unsigned int entries) override;
+        int fd, size_t entry_size, unsigned int entries, bool multishot) override;
     void cancel_fd(int fd) override;
     void step(int timeout_ms = -1) override;
 

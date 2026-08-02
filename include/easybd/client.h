@@ -37,10 +37,16 @@ int easybd_io_uring_available(void);
 
 /* Connects to host:port and returns 0 on success (with *out set), or a
  * negative errno on failure (*out left untouched). Blocks the calling
- * thread until the connection completes. */
+ * thread until the connection completes.
+ *
+ * feature_multishot: nonzero to use io_uring multishot recv for parsing
+ * responses off this connection, zero for an ordinary recv per chunk (see
+ * easyio's Queue::recv_stream() doc comment for what the difference is).
+ * Only meaningful with backend == EASYBD_BACKEND_IO_URING; ignored (there
+ * is no multishot recv to begin with) with EASYBD_BACKEND_LIBC. */
 int easybd_client_create(
     const char* host, uint16_t port, EasyBDBackend backend, unsigned int queue_depth,
-    EasyBDClient** out);
+    int feature_multishot, EasyBDClient** out);
 
 /* Closes the connection. Any requests still in flight at this point never
  * get their callback invoked. */

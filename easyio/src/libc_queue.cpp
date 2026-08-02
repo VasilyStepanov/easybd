@@ -409,8 +409,8 @@ Task<size_t> Queue::sendmsg(int fd, const iovec* iov, int iovcnt) {
 }
 
 std::unique_ptr<RecvStream> Queue::recv_stream(
-    int fd, size_t entry_size, unsigned int entries) {
-    return make_recv_stream(*this, fd, entry_size, entries);
+    int fd, size_t entry_size, unsigned int entries, bool multishot) {
+    return make_recv_stream(*this, fd, entry_size, entries, multishot);
 }
 
 } // namespace easyio::libc_backend
