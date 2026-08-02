@@ -57,7 +57,7 @@ public:
     Queue(const Queue&) = delete;
     Queue& operator=(const Queue&) = delete;
 
-    unsigned int depth() const noexcept { return _depth; }
+    [[nodiscard]] unsigned int depth() const noexcept { return _depth; }
     [[nodiscard]] virtual Backend backend() const noexcept = 0;
 
     virtual Task<int> open(const char* path, int flags, mode_t mode) = 0;
@@ -86,8 +86,10 @@ public:
 
     // Pumps completions, resuming coroutines as their operations finish.
     // Blocks the calling thread when there is nothing ready. Returns when
-    // stop() has been called (and no operations remain in flight from a
-    // prior stop request still unwinding) or on an unrecoverable error.
+    // stop() has been called, when a signal interrupts the wait (so a
+    // signal handler that just sets a flag can still get run() to return
+    // promptly -- the caller decides whether to call run() again), or on
+    // an unrecoverable error (thrown).
     virtual void run() = 0;
 
     // Requests that a currently-running (or future) call to run() return
@@ -98,5 +100,10 @@ public:
 private:
     unsigned int _depth;
 };
+
+// Sends exactly `size` bytes, looping over Queue::send()'s short-write-
+// permitting result. Built purely on the public Queue interface, so it's
+// backend-agnostic.
+Task<void> send_all(Queue& queue, int fd, const void* buf, size_t size);
 
 } // namespace easyio

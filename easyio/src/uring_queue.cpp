@@ -87,7 +87,13 @@ void Queue::_dispatch() {
 void Queue::run() {
     while (!_stop_requested) {
         int ret = io_uring_submit_and_wait(&_ring, 1);
-        if (ret < 0 && ret != -EINTR) {
+        if (ret < 0) {
+            if (ret == -EINTR) {
+                // Let the caller decide whether to resume pumping (e.g.
+                // after checking a shutdown flag a signal handler set) --
+                // silently retrying here would make run() uninterruptible.
+                return;
+            }
             throw_errno(ret, "io_uring_submit_and_wait");
         }
         _dispatch();

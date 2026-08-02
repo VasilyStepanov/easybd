@@ -1,4 +1,5 @@
 #include <easyio/framed_reader.hpp>
+#include <easyio/mutex.hpp>
 #include <easyio/queue.hpp>
 #include <easyio/task.hpp>
 
@@ -234,6 +235,112 @@ TEST_P(EasyioTest, FramedReaderExactBoundaries) {
         framed_client(*queue, client_fd, addr, expected));
 
     EXPECT_EQ(received, expected);
+    ::close(listen_fd);
+}
+
+// Minimal WaitGroup so a test coroutine can wait for N independently
+// spawned (fire-and-forget) tasks to finish -- not part of easyio itself,
+// this is purely test plumbing to get real concurrency between the two
+// send_pattern() producers below (spawn() starts a task eagerly, unlike
+// co_await-ing a Task<T> in sequence).
+struct WaitGroup {
+    int remaining = 0;
+    std::coroutine_handle<> waiter;
+
+    struct Awaiter {
+        WaitGroup* wg;
+        [[nodiscard]] bool await_ready() const noexcept { return wg->remaining == 0; }
+        void await_suspend(std::coroutine_handle<> h) noexcept { wg->waiter = h; }
+        void await_resume() const noexcept {}
+    };
+
+    Awaiter wait() noexcept { return Awaiter{this}; }
+
+    void done() noexcept {
+        if (--remaining == 0 && waiter) {
+            std::exchange(waiter, nullptr).resume();
+        }
+    }
+};
+
+easyio::Task<void> tracked(easyio::Task<void> t, WaitGroup& wg) {
+    co_await std::move(t);
+    wg.done();
+}
+
+easyio::Task<void> send_pattern(
+    easyio::Queue& queue, int fd, easyio::Mutex& mtx, char marker, size_t count) {
+    auto guard = co_await easyio::lock_guard(mtx);
+    std::string msg(count, marker);
+    // Send in small pieces, each a real suspend/resume round trip, so the
+    // other producer has every opportunity to interleave if the mutex
+    // didn't actually serialize them.
+    size_t off = 0;
+    while (off < msg.size()) {
+        size_t piece = std::min<size_t>(3, msg.size() - off);
+        co_await easyio::send_all(queue, fd, msg.data() + off, piece);
+        off += piece;
+    }
+}
+
+easyio::Task<void> mutex_server(easyio::Queue& queue, int listen_fd) {
+    int client_fd = co_await queue.accept(listen_fd);
+    easyio::Mutex mtx;
+    WaitGroup wg{2, nullptr};
+    easyio::spawn(tracked(send_pattern(queue, client_fd, mtx, 'A', 3000), wg));
+    easyio::spawn(tracked(send_pattern(queue, client_fd, mtx, 'B', 3000), wg));
+    co_await wg.wait();
+    co_await queue.close(client_fd);
+}
+
+easyio::Task<void> recv_all_into(easyio::Queue& queue, int fd, std::string* out) {
+    auto stream = queue.recv_stream(fd, 4096, 4);
+    std::string data;
+    for (;;) {
+        auto chunk = co_await stream->next();
+        if (chunk.error != 0) {
+            throw std::system_error(-chunk.error, std::generic_category(), "recv");
+        }
+        if (chunk.data.empty()) {
+            break;
+        }
+        data.append(reinterpret_cast<const char*>(chunk.data.data()), chunk.data.size());
+    }
+    *out = std::move(data);
+}
+
+easyio::Task<void> mutex_client(
+    easyio::Queue& queue, int fd, sockaddr_in addr, std::string* out) {
+    co_await queue.connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+    co_await recv_all_into(queue, fd, out);
+    co_await queue.close(fd);
+}
+
+TEST_P(EasyioTest, MutexSerializesConcurrentSends) {
+    auto queue = easyio::Queue::create(GetParam(), 32);
+
+    uint16_t port = 0;
+    int listen_fd = make_listen_socket(&port);
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    easyio::set_nonblocking(client_fd);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    std::string received;
+    run_pair(
+        *queue, mutex_server(*queue, listen_fd), mutex_client(*queue, client_fd, addr, &received));
+
+    // Both producers' messages must show up whole and non-interleaved,
+    // regardless of which one happened to acquire the mutex first.
+    std::string a(3000, 'A');
+    std::string b(3000, 'B');
+    EXPECT_TRUE(received == a + b || received == b + a)
+        << "received.size()=" << received.size();
     ::close(listen_fd);
 }
 

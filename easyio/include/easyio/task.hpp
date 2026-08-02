@@ -21,7 +21,7 @@ struct TaskPromiseBase {
     std::coroutine_handle<> continuation;
 
     struct FinalAwaiter {
-        bool await_ready() const noexcept { return false; }
+        [[nodiscard]] bool await_ready() const noexcept { return false; }
 
         template <typename Promise>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept {
@@ -51,6 +51,10 @@ struct TaskPromise final : TaskPromiseBase {
         result.template emplace<1>(std::forward<U>(value));
     }
 
+    // NOLINTNEXTLINE(bugprone-exception-escape): variant::emplace could in
+    // principle throw (e.g. OOM); noexcept here is deliberate -- coroutine
+    // machinery requires this not to throw, and terminating is the right
+    // response to that scenario anyway.
     void unhandled_exception() noexcept {
         result.template emplace<2>(std::current_exception());
     }
@@ -105,7 +109,7 @@ public:
 
     ~Task() { destroy(); }
 
-    bool valid() const noexcept { return static_cast<bool>(_handle); }
+    [[nodiscard]] bool valid() const noexcept { return static_cast<bool>(_handle); }
 
     // Awaiter protocol: co_await task resumes the calling coroutine once
     // task's body completes.
@@ -127,7 +131,7 @@ public:
         }
     }
 
-    std::coroutine_handle<promise_type> handle() const noexcept { return _handle; }
+    [[nodiscard]] std::coroutine_handle<promise_type> handle() const noexcept { return _handle; }
 
 private:
     void destroy() {

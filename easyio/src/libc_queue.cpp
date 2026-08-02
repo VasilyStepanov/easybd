@@ -227,7 +227,10 @@ void Queue::run() {
         int n = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), -1);
         if (n < 0) {
             if (errno == EINTR) {
-                continue;
+                // Let the caller decide whether to resume pumping (e.g.
+                // after checking a shutdown flag a signal handler set) --
+                // silently retrying here would make run() uninterruptible.
+                return;
             }
             throw_errno(errno, "poll");
         }

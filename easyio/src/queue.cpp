@@ -57,4 +57,12 @@ std::unique_ptr<Queue> Queue::create(Backend backend, unsigned int depth) {
     throw std::invalid_argument("easyio: unknown backend");
 }
 
+Task<void> send_all(Queue& queue, int fd, const void* buf, size_t size) {
+    const auto* p = static_cast<const std::byte*>(buf);
+    size_t off = 0;
+    while (off < size) {
+        off += co_await queue.send(fd, p + off, size - off);
+    }
+}
+
 } // namespace easyio

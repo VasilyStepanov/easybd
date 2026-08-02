@@ -12,7 +12,8 @@ libeasyio_la_SOURCES = \
 	$(top_srcdir)/easyio/include/easyio/task.hpp \
 	$(top_srcdir)/easyio/include/easyio/queue.hpp \
 	$(top_srcdir)/easyio/include/easyio/recv_stream.hpp \
-	$(top_srcdir)/easyio/include/easyio/framed_reader.hpp
+	$(top_srcdir)/easyio/include/easyio/framed_reader.hpp \
+	$(top_srcdir)/easyio/include/easyio/mutex.hpp
 # NOTE: automake commits to using libeasyio_la_CPPFLAGS/_LIBADD instead of
 # AM_CPPFLAGS/global LIBADD in the compile/link rules as soon as either is
 # assigned anywhere in this file, even inside an `if` block that may end up
