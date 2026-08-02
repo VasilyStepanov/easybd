@@ -40,6 +40,8 @@ AC_CONFIG_FILES([
     easyio/src/Makefile
     easyio/tests/Makefile
     server/Makefile
+    client/Makefile
+    easybd.pc
 ])
 
 AC_OUTPUT

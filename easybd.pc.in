@@ -1,0 +1,10 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: easybd
+Description: Client library for the easybd trivial block-over-TCP protocol
+Version: @PACKAGE_VERSION@
+Libs: -L${libdir} -leasybd
+Cflags: -I${includedir}

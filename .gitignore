@@ -88,3 +88,4 @@ Makefile.in
 test-suite.log
 /easyio/tests/test_all
 /server/easybd-server
+/easybd.pc
