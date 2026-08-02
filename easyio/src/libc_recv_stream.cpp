@@ -32,14 +32,27 @@ public:
 
 private:
     bool _ready() noexcept override {
+        // Must run here, not just at the top of _take(): _ready() is called
+        // on every next() regardless of whether it ends up suspending, but
+        // _take() only runs once a chunk is actually delivered. If a
+        // request's whole response was satisfied by one already-buffered
+        // chunk (no further next() call needed), _take() never runs again
+        // for it, so the slot it checked out stays "checked out" forever
+        // unless something else frees it -- and with entries == 1, that's
+        // the entire ring, permanently wedging on_ready() into thinking
+        // there's never room for another recv() even though the data it
+        // last delivered has long since been copied out and the fd may
+        // have gone on to deliver more (silently sitting unread in the
+        // kernel's receive buffer -- confirmed via `ss -tn` Recv-Q while
+        // chasing this down). See uring_recv_stream.cpp's _ready(), which
+        // already gets this right.
+        _return_checked_out();
         return !_pending.empty() || _eof || _error != 0;
     }
 
     void _arm(std::coroutine_handle<> h) noexcept override { _waiter = h; }
 
     Chunk _take() noexcept override {
-        _return_checked_out();
-
         if (!_pending.empty()) {
             Pending p = _pending.front();
             _pending.pop_front();
