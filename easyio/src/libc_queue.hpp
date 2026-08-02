@@ -43,6 +43,7 @@ public:
     Task<int> accept(int fd) override;
     Task<void> connect(int fd, const sockaddr* addr, socklen_t addrlen) override;
     Task<size_t> send(int fd, const void* buf, size_t size) override;
+    Task<size_t> sendmsg(int fd, const iovec* iov, int iovcnt) override;
     std::unique_ptr<RecvStream> recv_stream(
         int fd, size_t entry_size, unsigned int entries) override;
     void cancel_fd(int fd) override;

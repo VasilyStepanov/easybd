@@ -74,4 +74,29 @@ Task<void> send_all(Queue& queue, int fd, const void* buf, size_t size) {
     }
 }
 
+Task<void> send_all(
+    Queue& queue, int fd, const void* buf1, size_t size1, const void* buf2, size_t size2) {
+    iovec iov[2] = {
+        {const_cast<void*>(buf1), size1},
+        {const_cast<void*>(buf2), size2},
+    };
+    size_t total = size1 + size2;
+    size_t sent = 0;
+    int first = 0;
+    while (sent < total) {
+        size_t n = co_await queue.sendmsg(fd, iov + first, 2 - first);
+        sent += n;
+        while (n > 0) {
+            if (n < iov[first].iov_len) {
+                iov[first].iov_base = static_cast<std::byte*>(iov[first].iov_base) + n;
+                iov[first].iov_len -= n;
+                n = 0;
+            } else {
+                n -= iov[first].iov_len;
+                ++first;
+            }
+        }
+    }
+}
+
 } // namespace easyio

@@ -43,6 +43,36 @@ private:
     int _result = 0;
 };
 
+// Gathered send: unlike SqeAwaiter's prep-lambda approach, the msghdr must
+// stay alive for as long as the kernel might still read it -- i.e. until
+// the CQE arrives, not just until prep returns -- so it has to be a member
+// of the awaiter itself (which, like SqeAwaiter, lives on the awaiting
+// coroutine's frame) rather than a temporary built inside a lambda.
+class SendMsgAwaiter final : public CqeSink {
+public:
+    SendMsgAwaiter(Queue& queue, int fd, const iovec* iov, int iovcnt) {
+        _msg.msg_iov = const_cast<iovec*>(iov);
+        _msg.msg_iovlen = static_cast<size_t>(iovcnt);
+        io_uring_sqe* sqe = queue._get_sqe();
+        io_uring_prep_sendmsg(sqe, fd, &_msg, MSG_NOSIGNAL);
+        io_uring_sqe_set_data(sqe, static_cast<CqeSink*>(this));
+    }
+
+    [[nodiscard]] bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<> h) noexcept { _handle = h; }
+    [[nodiscard]] int await_resume() const noexcept { return _result; }
+
+private:
+    void on_cqe(int res, unsigned int /*flags*/) noexcept override {
+        _result = res;
+        _handle.resume();
+    }
+
+    msghdr _msg{};
+    std::coroutine_handle<> _handle;
+    int _result = 0;
+};
+
 } // namespace
 
 Queue::Queue(unsigned int depth) : easyio::Queue(depth) {
@@ -189,10 +219,18 @@ Task<void> Queue::connect(int fd, const sockaddr* addr, socklen_t addrlen) {
 
 Task<size_t> Queue::send(int fd, const void* buf, size_t size) {
     int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
-        io_uring_prep_send(sqe, fd, buf, size, 0);
+        io_uring_prep_send(sqe, fd, buf, size, MSG_NOSIGNAL);
     });
     if (res < 0) {
         throw_errno(res, "send");
+    }
+    co_return static_cast<size_t>(res);
+}
+
+Task<size_t> Queue::sendmsg(int fd, const iovec* iov, int iovcnt) {
+    int res = co_await SendMsgAwaiter(*this, fd, iov, iovcnt);
+    if (res < 0) {
+        throw_errno(res, "sendmsg");
     }
     co_return static_cast<size_t>(res);
 }

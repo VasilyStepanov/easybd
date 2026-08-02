@@ -135,9 +135,10 @@ easyio::Task<void> Client::send_request(
     EasybdRequestHeader req{cid, offset, size, op};
     auto guard = co_await easyio::lock_guard(_send_mtx);
     try {
-        co_await easyio::send_all(*_queue, _fd, &req, sizeof(req));
         if (op == EASYBD_OP_WRITE) {
-            co_await easyio::send_all(*_queue, _fd, payload, size);
+            co_await easyio::send_all(*_queue, _fd, &req, sizeof(req), payload, size);
+        } else {
+            co_await easyio::send_all(*_queue, _fd, &req, sizeof(req));
         }
     } catch (...) { // NOLINT(bugprone-empty-catch): handled below, not empty
         // Sending this request failed. It may already have been failed by

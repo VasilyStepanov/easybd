@@ -44,9 +44,11 @@ easyio::Task<void> handle_read(
 
     EasybdResponseHeader resp{cid, res};
     auto guard = co_await easyio::lock_guard(send_mtx);
-    co_await easyio::send_all(queue, client_fd, &resp, sizeof(resp));
     if (res > 0) {
-        co_await easyio::send_all(queue, client_fd, buf.data(), static_cast<size_t>(res));
+        co_await easyio::send_all(
+            queue, client_fd, &resp, sizeof(resp), buf.data(), static_cast<size_t>(res));
+    } else {
+        co_await easyio::send_all(queue, client_fd, &resp, sizeof(resp));
     }
 }
 
