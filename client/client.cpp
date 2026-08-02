@@ -111,13 +111,24 @@ easyio::Task<void> Client::reader_loop() {
                 // read's payload follows this header or not.
                 throw std::runtime_error("easybd: response with unknown cid");
             }
+            // Copy out, but leave the map entry in place until the body (if
+            // any) is fully read: read_exact() below can throw (a large
+            // body's multishot recv can still fail partway through), and if
+            // it does, this cid must still be in _pending for the catch
+            // block's fail_all_pending() to find and fail it -- erasing it
+            // up front, before the body was actually confirmed read, would
+            // silently drop this request's callback forever instead, since
+            // by the time the exception propagates there'd be no trace of
+            // it left to fail. `it` itself isn't used past this point since
+            // the co_await below may run other coroutines that insert into
+            // _pending and rehash it, invalidating the iterator.
             Pending pending = it->second;
-            _pending.erase(it);
 
             if (pending.is_read && resp.res > 0) {
                 auto body_span = co_await reader.read_exact(static_cast<size_t>(resp.res));
                 std::memcpy(pending.buf, body_span.data(), static_cast<size_t>(resp.res));
             }
+            _pending.erase(resp.cid);
 
             ++_total_dispatched;
             pending.cb(resp.res, pending.user_data);
