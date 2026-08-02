@@ -10,7 +10,7 @@
 
 namespace {
 
-easyio::Backend to_easyio_backend(EasybdBackend backend) {
+easyio::Backend to_easyio_backend(EasyBDBackend backend) {
     switch (backend) {
     case EASYBD_BACKEND_IO_URING:
         return easyio::Backend::IoUring;
@@ -27,11 +27,11 @@ extern "C" {
 int easybd_io_uring_available(void) { return easyio::io_uring_available() ? 1 : 0; }
 
 int easybd_client_create(
-    const char* host, uint16_t port, EasybdBackend backend, unsigned int queue_depth,
-    EasybdClient** out) {
+    const char* host, uint16_t port, EasyBDBackend backend, unsigned int queue_depth,
+    EasyBDClient** out) {
     try {
         auto* client = new easybd::Client(host, port, to_easyio_backend(backend), queue_depth);
-        *out = reinterpret_cast<EasybdClient*>(client);
+        *out = reinterpret_cast<EasyBDClient*>(client);
         return 0;
     } catch (const std::system_error& e) {
         return -e.code().value();
@@ -44,12 +44,12 @@ int easybd_client_create(
     }
 }
 
-void easybd_client_destroy(EasybdClient* client) {
+void easybd_client_destroy(EasyBDClient* client) {
     delete reinterpret_cast<easybd::Client*>(client); // NOLINT(cppcoreguidelines-owning-memory)
 }
 
 int easybd_client_pread(
-    EasybdClient* client, void* buf, size_t size, uint64_t offset, EasybdCallback cb,
+    EasyBDClient* client, void* buf, size_t size, uint64_t offset, EasyBDCallback cb,
     void* user_data) {
     try {
         return reinterpret_cast<easybd::Client*>(client)->pread(buf, size, offset, cb, user_data);
@@ -63,7 +63,7 @@ int easybd_client_pread(
 }
 
 int easybd_client_pwrite(
-    EasybdClient* client, const void* buf, size_t size, uint64_t offset, EasybdCallback cb,
+    EasyBDClient* client, const void* buf, size_t size, uint64_t offset, EasyBDCallback cb,
     void* user_data) {
     try {
         return reinterpret_cast<easybd::Client*>(client)->pwrite(
@@ -77,7 +77,7 @@ int easybd_client_pwrite(
     }
 }
 
-int easybd_client_wait(EasybdClient* client, int timeout_ms) {
+int easybd_client_wait(EasyBDClient* client, int timeout_ms) {
     try {
         return reinterpret_cast<easybd::Client*>(client)->wait(timeout_ms);
     } catch (const std::system_error& e) {

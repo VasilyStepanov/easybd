@@ -28,8 +28,8 @@ public:
     Client(const Client&) = delete;
     Client& operator=(const Client&) = delete;
 
-    int pread(void* buf, size_t size, uint64_t offset, EasybdCallback cb, void* user_data);
-    int pwrite(const void* buf, size_t size, uint64_t offset, EasybdCallback cb, void* user_data);
+    int pread(void* buf, size_t size, uint64_t offset, EasyBDCallback cb, void* user_data);
+    int pwrite(const void* buf, size_t size, uint64_t offset, EasyBDCallback cb, void* user_data);
 
     // Returns the number of callbacks invoked. May throw std::system_error
     // if the underlying queue hits an unrecoverable error (extremely
@@ -40,7 +40,7 @@ private:
     struct Pending {
         bool is_read;
         void* buf; // read target; unused for writes
-        EasybdCallback cb;
+        EasyBDCallback cb;
         void* user_data;
     };
 
