@@ -33,14 +33,24 @@ bool io_uring_available() noexcept;
 // want to be backend-agnostic should just always call this once per fd.
 void set_nonblocking(int fd);
 
+// Disables Nagle's algorithm on a TCP socket. Without this, a request/
+// response protocol that sends a header and payload as separate writes
+// stalls for the platform's delayed-ACK timeout (~40ms on Linux) on every
+// round trip: Nagle holds back the trailing small segment waiting for an
+// ACK of the previous one, and the peer has nothing to piggyback that ACK
+// on until it has read the full request, so nothing moves until the
+// timer fires. Callers on both ends of a low-latency connection must set
+// this.
+void set_tcp_nodelay(int fd);
+
 // Abstract async I/O queue. Only the operations actually needed by the
 // easybd server/client are exposed -- this is not a general-purpose port of
 // librawio's full API surface.
 //
-// A Queue is driven by exactly one thread, which must call run() to pump
+// A Queue is driven by exactly one thread, which must call step() to pump
 // completions and resume waiting coroutines; there is no internal thread or
 // background reactor. Tasks returned by the methods below only make
-// progress while run() is executing on some thread -- typically the same
+// progress while step() is executing on some thread -- typically the same
 // thread that owns the Queue and spawned the tasks in the first place.
 //
 // Coroutines that co_await a Queue operation and throw std::system_error on
@@ -84,23 +94,26 @@ public:
     // unwind before the fd is closed. Does not close fd itself.
     virtual void cancel_fd(int fd) = 0;
 
-    // Pumps completions, resuming coroutines as their operations finish.
-    // Blocks the calling thread when there is nothing ready, for at most
-    // timeout_ms (a negative value, the default, blocks indefinitely).
-    // Returns when stop() has been called, when timeout_ms elapses with
-    // nothing to do, or when a signal interrupts the wait -- these three
-    // cases are otherwise indistinguishable to the caller by design: a
-    // std::atomic<bool> shutdown flag checked between calls, combined with
-    // a bounded timeout_ms, is enough to shut a worker thread down
-    // promptly without any signal-delivery machinery (pthread_kill and
-    // friends) to force a blocking wait to return. Throws on an
-    // unrecoverable error.
-    virtual void run(int timeout_ms = -1) = 0;
-
-    // Requests that a currently-running (or future) call to run() return
-    // once the current batch of ready completions has been dispatched.
-    // Safe to call from within a coroutine running on this Queue.
-    virtual void stop() = 0;
+    // Waits for at least one completion (blocking the calling thread for at
+    // most timeout_ms; a negative value, the default, blocks indefinitely),
+    // resumes whichever coroutines just became ready, and returns -- this
+    // is exactly ONE wait-then-dispatch cycle, never more, regardless of
+    // whether more work is immediately available. Also returns (having
+    // dispatched nothing) if timeout_ms elapses with nothing ready, or if a
+    // signal interrupts the wait.
+    //
+    // This is deliberately not "pump until told to stop": a caller that
+    // wants to keep going just calls step() again -- e.g. a server worker's
+    // `while (!shutdown) queue->step(200);`, or Client::wait()'s single
+    // `queue->step(timeout_ms)` per call, matching fio's getevents()
+    // contract of "process what's ready, report how much, return". Looping
+    // *inside* step() until nothing is left could never return at all in
+    // that last case: once nothing further is pending, step(-1) would
+    // block forever waiting for a next event that isn't coming, even
+    // though the caller only asked to wait for "at least one".
+    //
+    // Throws on an unrecoverable error.
+    virtual void step(int timeout_ms = -1) = 0;
 
 private:
     unsigned int _depth;

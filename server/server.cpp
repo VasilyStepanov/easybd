@@ -23,7 +23,7 @@ namespace easybd {
 
 namespace {
 
-// How often each worker's blocking run() wakes up on its own (with nothing
+// How often each worker's blocking step() wakes up on its own (with nothing
 // to do) to check g_shutdown_requested. Bounds shutdown latency; this is
 // the only thing that makes threads shut down promptly without needing any
 // signal-delivery machinery (pthread_kill and friends) to force a blocking
@@ -33,7 +33,7 @@ constexpr int kShutdownPollTimeoutMs = 200;
 std::atomic<bool> g_shutdown_requested{false};
 
 // Deliberately minimal: just flips a flag. Every worker thread (and main)
-// polls it via the timeout on Queue::run()/a sleep loop, rather than the
+// polls it via the timeout on Queue::step()/a sleep loop, rather than the
 // signal needing to reach or interrupt any thread in particular.
 extern "C" void handle_shutdown_signal(int /*sig*/) {
     g_shutdown_requested.store(true, std::memory_order_relaxed);
@@ -70,7 +70,7 @@ int open_listen_socket(const std::string& host, uint16_t port) {
     }
     // Required for the libc backend: a blocking listen fd makes accept4()
     // block the whole worker thread waiting for the next connection
-    // instead of returning EAGAIN, which starves queue->run() of any
+    // instead of returning EAGAIN, which starves queue->step() of any
     // chance to service already-accepted connections (their sends/recvs
     // never get pumped) until a new client happens to show up. Harmless
     // for the io_uring backend, which doesn't need nonblocking fds.
@@ -133,11 +133,11 @@ void worker_main(
     auto queue = easyio::Queue::create(backend, depth);
     easyio::spawn(accept_loop(*queue, listen_fd, file_fd, file_size));
     // The pending accept (and any in-flight request) stays registered
-    // across these calls -- a timed-out run() just means "nothing happened
+    // across these calls -- a timed-out step() just means "nothing happened
     // in the last kShutdownPollTimeoutMs," not that anything gets
     // resubmitted or lost.
     while (!g_shutdown_requested.load(std::memory_order_relaxed)) {
-        queue->run(kShutdownPollTimeoutMs);
+        queue->step(kShutdownPollTimeoutMs);
     }
 }
 

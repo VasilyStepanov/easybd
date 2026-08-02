@@ -20,26 +20,35 @@
 
 namespace {
 
-// Drives two concurrent tasks to completion on one Queue, propagating the
-// first exception either raised (test assertions inside the tasks throw).
-easyio::Task<void> track(
-    easyio::Task<void> t, int& remaining, easyio::Queue& queue, std::exception_ptr& err) {
+// Drives one or more concurrent tasks to completion on one Queue,
+// propagating the first exception either raised (test assertions inside
+// the tasks throw).
+easyio::Task<void> track(easyio::Task<void> t, int& remaining, std::exception_ptr& err) {
     try {
         co_await std::move(t);
     } catch (...) {
         err = std::current_exception();
     }
-    if (--remaining == 0) {
-        queue.stop();
+    --remaining;
+}
+
+// step() does exactly one wait-then-dispatch cycle and returns (see
+// queue.hpp) -- it's the caller's job to keep calling it until whatever
+// they're waiting for is done. A bounded per-call timeout means a
+// genuinely-stuck test fails with a clear timeout instead of hanging CI
+// forever.
+void run_until_done(easyio::Queue& queue, const int& remaining) {
+    while (remaining > 0) {
+        queue.step(2000);
     }
 }
 
 void run_pair(easyio::Queue& queue, easyio::Task<void> a, easyio::Task<void> b) {
     int remaining = 2;
     std::exception_ptr err_a, err_b;
-    easyio::spawn(track(std::move(a), remaining, queue, err_a));
-    easyio::spawn(track(std::move(b), remaining, queue, err_b));
-    queue.run();
+    easyio::spawn(track(std::move(a), remaining, err_a));
+    easyio::spawn(track(std::move(b), remaining, err_b));
+    run_until_done(queue, remaining);
     if (err_a) {
         std::rethrow_exception(err_a);
     }
@@ -133,8 +142,8 @@ TEST_P(EasyioTest, FileReadWriteRoundtrip) {
 
     int remaining = 1;
     std::exception_ptr err;
-    easyio::spawn(track(file_roundtrip(*queue, path), remaining, *queue, err));
-    queue->run();
+    easyio::spawn(track(file_roundtrip(*queue, path), remaining, err));
+    run_until_done(*queue, remaining);
     ::unlink(path);
     if (err) {
         std::rethrow_exception(err);

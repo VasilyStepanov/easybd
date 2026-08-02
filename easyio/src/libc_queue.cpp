@@ -206,92 +206,84 @@ void Queue::cancel_fd(int fd) {
     }
 }
 
-void Queue::run(int timeout_ms) {
+void Queue::step(int timeout_ms) {
+    // Exactly one wait-then-dispatch cycle -- see queue.hpp for why this
+    // must not loop internally until nothing-left-to-do.
     std::vector<pollfd> pfds;
-    while (!_stop_requested) {
-        pfds.clear();
-        pfds.reserve(_fds.size());
-        for (auto& [fd, state] : _fds) {
-            short events = 0;
-            if (state.read_op) {
-                events |= POLLIN;
-            }
-            if (!state.write_queue.empty()) {
-                events |= POLLOUT;
-            }
-            if (events) {
-                pfds.push_back(pollfd{fd, events, 0});
-            }
+    pfds.reserve(_fds.size());
+    for (auto& [fd, state] : _fds) {
+        short events = 0;
+        if (state.read_op) {
+            events |= POLLIN;
         }
+        if (!state.write_queue.empty()) {
+            events |= POLLOUT;
+        }
+        if (events) {
+            pfds.push_back(pollfd{fd, events, 0});
+        }
+    }
 
-        int n = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeout_ms);
-        if (n < 0) {
-            if (errno == EINTR) {
-                // Let the caller decide whether to resume pumping --
-                // silently retrying here would make run() uninterruptible.
-                return;
-            }
-            throw_errno(errno, "poll");
-        }
-        if (n == 0) {
-            // timeout_ms elapsed with nothing ready: let the caller decide
-            // whether to call run() again (e.g. after checking a shutdown
-            // flag).
+    int n = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeout_ms);
+    if (n < 0) {
+        if (errno == EINTR) {
             return;
         }
+        throw_errno(errno, "poll");
+    }
+    if (n == 0) {
+        // timeout_ms elapsed with nothing ready.
+        return;
+    }
 
-        for (auto& pfd : pfds) {
-            if (pfd.revents == 0) {
-                continue;
-            }
-            if (pfd.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
-                auto it = _fds.find(pfd.fd);
-                if (it != _fds.end() && it->second.read_op) {
-                    FdOp* op = it->second.read_op;
-                    // on_ready() resumes a coroutine, which may reentrantly
-                    // submit new operations on *other* fds -- e.g. an
-                    // accept completing spawns a handler that registers a
-                    // recv_stream on the new client fd. That's an
-                    // unordered_map insertion, which can rehash and
-                    // invalidate `it` (references/pointers to elements
-                    // survive a rehash, but iterators don't) -- so `it`
-                    // must not be reused afterwards without re-finding it.
-                    if (op->on_ready()) {
-                        it = _fds.find(pfd.fd);
-                        if (it != _fds.end() && it->second.read_op == op) {
-                            it->second.read_op = nullptr;
-                        }
-                    }
-                }
-            }
-            if (pfd.revents & (POLLOUT | POLLHUP | POLLERR | POLLNVAL)) {
-                for (;;) {
-                    auto it = _fds.find(pfd.fd);
-                    if (it == _fds.end() || it->second.write_queue.empty()) {
-                        break;
-                    }
-                    FdOp* op = it->second.write_queue.front();
-                    if (!op->on_ready()) {
-                        break;
-                    }
-                    // Same reentrancy hazard as above: re-find rather than
-                    // reuse `it` across the on_ready() call.
-                    it = _fds.find(pfd.fd);
-                    if (it != _fds.end() && !it->second.write_queue.empty() &&
-                        it->second.write_queue.front() == op) {
-                        it->second.write_queue.pop_front();
-                    }
-                }
-            }
+    for (auto& pfd : pfds) {
+        if (pfd.revents == 0) {
+            continue;
+        }
+        if (pfd.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
             auto it = _fds.find(pfd.fd);
-            if (it != _fds.end() && it->second.empty()) {
-                _fds.erase(it);
+            if (it != _fds.end() && it->second.read_op) {
+                FdOp* op = it->second.read_op;
+                // on_ready() resumes a coroutine, which may reentrantly
+                // submit new operations on *other* fds -- e.g. an accept
+                // completing spawns a handler that registers a recv_stream
+                // on the new client fd. That's an unordered_map insertion,
+                // which can rehash and invalidate `it` (references/pointers
+                // to elements survive a rehash, but iterators don't) -- so
+                // `it` must not be reused afterwards without re-finding it.
+                if (op->on_ready()) {
+                    it = _fds.find(pfd.fd);
+                    if (it != _fds.end() && it->second.read_op == op) {
+                        it->second.read_op = nullptr;
+                    }
+                }
             }
+        }
+        if (pfd.revents & (POLLOUT | POLLHUP | POLLERR | POLLNVAL)) {
+            for (;;) {
+                auto it = _fds.find(pfd.fd);
+                if (it == _fds.end() || it->second.write_queue.empty()) {
+                    break;
+                }
+                FdOp* op = it->second.write_queue.front();
+                if (!op->on_ready()) {
+                    break;
+                }
+                // Same reentrancy hazard as above: re-find rather than
+                // reuse `it` across the on_ready() call.
+                it = _fds.find(pfd.fd);
+                if (it != _fds.end() && !it->second.write_queue.empty() &&
+                    it->second.write_queue.front() == op) {
+                    it->second.write_queue.pop_front();
+                }
+            }
+        }
+        auto it = _fds.find(pfd.fd);
+        if (it != _fds.end() && it->second.empty()) {
+            _fds.erase(it);
         }
     }
 }
-
-void Queue::stop() { _stop_requested = true; }
 
 Task<int> Queue::open(const char* path, int flags, mode_t mode) {
     int fd = ::open(path, flags, mode);
