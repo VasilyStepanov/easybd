@@ -22,7 +22,7 @@ public:
     explicit Queue(unsigned int depth);
     ~Queue() override;
 
-    Backend backend() const noexcept override { return Backend::IoUring; }
+    [[nodiscard]] Backend backend() const noexcept override { return Backend::IoUring; }
 
     Task<int> open(const char* path, int flags, mode_t mode) override;
     Task<void> close(int fd) override;
@@ -48,7 +48,7 @@ public:
 private:
     void _dispatch();
 
-    io_uring _ring;
+    io_uring _ring{};
     bool _stop_requested = false;
 };
 

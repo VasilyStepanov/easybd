@@ -58,7 +58,7 @@ public:
     Queue& operator=(const Queue&) = delete;
 
     unsigned int depth() const noexcept { return _depth; }
-    virtual Backend backend() const noexcept = 0;
+    [[nodiscard]] virtual Backend backend() const noexcept = 0;
 
     virtual Task<int> open(const char* path, int flags, mode_t mode) = 0;
     virtual Task<void> close(int fd) = 0;

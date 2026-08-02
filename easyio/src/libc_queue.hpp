@@ -34,7 +34,7 @@ public:
     explicit Queue(unsigned int depth);
     ~Queue() override;
 
-    Backend backend() const noexcept override { return Backend::Libc; }
+    [[nodiscard]] Backend backend() const noexcept override { return Backend::Libc; }
 
     Task<int> open(const char* path, int flags, mode_t mode) override;
     Task<void> close(int fd) override;
@@ -63,7 +63,7 @@ private:
     struct FdState {
         FdOp* read_op = nullptr;
         std::deque<FdOp*> write_queue;
-        bool empty() const noexcept { return !read_op && write_queue.empty(); }
+        [[nodiscard]] bool empty() const noexcept { return !read_op && write_queue.empty(); }
     };
 
     std::unordered_map<int, FdState> _fds;

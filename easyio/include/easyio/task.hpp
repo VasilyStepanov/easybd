@@ -109,14 +109,14 @@ public:
 
     // Awaiter protocol: co_await task resumes the calling coroutine once
     // task's body completes.
-    bool await_ready() const noexcept { return !_handle || _handle.done(); }
+    [[nodiscard]] bool await_ready() const noexcept { return !_handle || _handle.done(); }
 
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting) noexcept {
         _handle.promise().continuation = awaiting;
         return _handle;
     }
 
-    T await_resume() { return _handle.promise().take_result(); }
+    [[nodiscard]] T await_resume() { return _handle.promise().take_result(); }
 
     // Drives the coroutine to its first suspension point (i.e. actually
     // starts it) without waiting for a result. Used to fire-and-forget

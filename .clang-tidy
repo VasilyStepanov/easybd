@@ -1,0 +1,11 @@
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  modernize-*,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-pro-type-member-init,
+  -bugprone-easily-swappable-parameters,
+  -modernize-use-trailing-return-type
+WarningsAsErrors: ''

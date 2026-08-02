@@ -29,9 +29,9 @@ public:
         io_uring_sqe_set_data(sqe, static_cast<CqeSink*>(this));
     }
 
-    bool await_ready() const noexcept { return false; }
+    [[nodiscard]] bool await_ready() const noexcept { return false; }
     void await_suspend(std::coroutine_handle<> h) noexcept { _handle = h; }
-    int await_resume() const noexcept { return _result; }
+    [[nodiscard]] int await_resume() const noexcept { return _result; }
 
 private:
     void on_cqe(int res, unsigned int /*flags*/) noexcept override {

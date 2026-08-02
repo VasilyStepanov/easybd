@@ -17,13 +17,27 @@ unsigned short next_buffer_group_id() noexcept {
     return counter.fetch_add(1, std::memory_order_relaxed);
 }
 
-// Multishot recv on one fd, backed by an io_uring provided buffer ring: the
-// kernel fills buffers from the ring as data arrives and keeps generating
-// CQEs (IORING_CQE_F_MORE) without us resubmitting, until it errors, hits
-// EOF, or runs out of provided buffers.
-class RecvStreamImpl final : public RecvStream, public CqeSink {
+class RecvStreamImpl;
+
+// Owns the provided buffer ring and is the actual io_uring completion
+// target (sqe/cqe user_data) for the multishot recv op -- kept separate
+// from RecvStreamImpl so it can outlive it.
+//
+// This matters because Queue::_dispatch() resumes coroutines synchronously
+// while iterating a batch of CQEs that may contain more than one entry for
+// operations on the connection being torn down. If a coroutine resumed
+// partway through that batch destroys its RecvStream (e.g. because the
+// connection is done and closes it), a later CQE in the *same* batch may
+// still be addressed to it. Cancelling synchronously from within
+// ~RecvStreamImpl (the previous approach, via io_uring_register_sync_cancel)
+// both reenters the ring mid-iteration and frees memory a not-yet-processed
+// CQE in this batch still points at -- both are use-after-free/corruption.
+// Instead, ~RecvStreamImpl detaches this sink and lets it keep itself alive
+// (via a plain async cancel SQE) until it observes the op's own terminal
+// CQE (IORING_CQE_F_MORE unset), only then freeing the buffer ring.
+class RecvSink final : public CqeSink {
 public:
-    RecvStreamImpl(Queue& queue, int fd, size_t entry_size, unsigned int entries)
+    RecvSink(Queue& queue, int fd, size_t entry_size, unsigned int entries)
         : _queue(queue), _fd(fd), _entry_size(entry_size), _entries(entries),
           _bgid(next_buffer_group_id()) {
         int ret = 0;
@@ -42,35 +56,89 @@ public:
         for (unsigned int i = 0; i < _entries; ++i) {
             io_uring_buf_ring_add(
                 _br, static_cast<char*>(_buf_base) + i * _entry_size,
-                static_cast<unsigned int>(_entry_size), static_cast<unsigned short>(i), mask, i);
+                static_cast<unsigned int>(_entry_size), static_cast<unsigned short>(i), mask,
+                static_cast<int>(i));
         }
         io_uring_buf_ring_advance(_br, static_cast<int>(_entries));
 
-        _submit_recv();
+        submit_recv();
     }
 
-    ~RecvStreamImpl() override {
-        io_uring_sync_cancel_reg reg{};
-        reg.addr = reinterpret_cast<unsigned long long>(static_cast<CqeSink*>(this));
-        reg.fd = _fd;
-        // Ignore the result: ENOENT just means the multishot op had already
-        // finished (EOF/error) before we got here.
-        io_uring_register_sync_cancel(&_queue._ring_handle(), &reg);
-
+    ~RecvSink() {
         free(_buf_base);
         io_uring_free_buf_ring(&_queue._ring_handle(), _br, _entries, _bgid);
     }
 
-private:
-    void _submit_recv() {
+    void submit_recv() {
         io_uring_sqe* sqe = _queue._get_sqe();
         io_uring_prep_recv_multishot(sqe, _fd, nullptr, 0, 0);
         sqe->flags |= IOSQE_BUFFER_SELECT;
         sqe->buf_group = _bgid;
         io_uring_sqe_set_data(sqe, static_cast<CqeSink*>(this));
+        _live = true;
     }
 
-    void on_cqe(int res, unsigned int flags) noexcept override {
+    // Best-effort: if there's no room to even queue the cancel SQE, we just
+    // leak this sink rather than risk throwing out of a destructor.
+    void request_cancel() noexcept {
+        try {
+            io_uring_sqe* sqe = _queue._get_sqe();
+            io_uring_prep_cancel(sqe, static_cast<CqeSink*>(this), 0);
+            io_uring_sqe_set_data(sqe, nullptr);
+        } catch (...) { // NOLINT(bugprone-empty-catch): deliberately best-effort, see comment above
+        }
+    }
+
+    [[nodiscard]] bool live() const noexcept { return _live; }
+    void detach() noexcept { owner = nullptr; }
+
+    void* buf_base() noexcept { return _buf_base; }
+    [[nodiscard]] size_t entry_size() const noexcept { return _entry_size; }
+    [[nodiscard]] unsigned int entries() const noexcept { return _entries; }
+    io_uring_buf_ring* buf_ring() noexcept { return _br; }
+
+    RecvStreamImpl* owner = nullptr;
+
+private:
+    void on_cqe(int res, unsigned int flags) noexcept override;
+
+    Queue& _queue;
+    int _fd;
+    size_t _entry_size;
+    unsigned int _entries;
+    unsigned short _bgid;
+
+    void* _buf_base = nullptr;
+    size_t _buf_len = 0;
+    io_uring_buf_ring* _br = nullptr;
+    bool _live = false;
+};
+
+// Multishot recv on one fd: the kernel fills buffers from RecvSink's
+// provided buffer ring as data arrives and keeps generating CQEs
+// (IORING_CQE_F_MORE) without us resubmitting, until it errors, hits EOF,
+// or runs out of provided buffers (ENOBUFS, handled by resubmitting once a
+// buffer frees up rather than treating it as terminal).
+class RecvStreamImpl final : public RecvStream {
+public:
+    RecvStreamImpl(Queue& queue, int fd, size_t entry_size, unsigned int entries)
+        : _sink(new RecvSink(queue, fd, entry_size, entries)) {
+        _sink->owner = this;
+    }
+
+    ~RecvStreamImpl() override {
+        _sink->detach();
+        if (_sink->live()) {
+            _sink->request_cancel();
+            // Ownership of the sink (and its eventual cleanup) is now
+            // fully self-contained: it deletes itself once it observes the
+            // cancellation's terminal completion.
+        } else {
+            delete _sink;
+        }
+    }
+
+    void handle_cqe(int res, unsigned int flags) noexcept {
         bool more = flags & IORING_CQE_F_MORE;
         bool enobufs = false;
 
@@ -117,6 +185,7 @@ private:
         }
     }
 
+private:
     // Runs at the start of every next() call (see recv_stream.hpp): reclaims
     // the buffer handed out by the previous _take(), which by contract the
     // caller is done with as of this new call, then reports whether a chunk
@@ -134,7 +203,7 @@ private:
             _pending.pop_front();
             _checked_out_idx = static_cast<int>(p.buf_idx);
             const auto* base = reinterpret_cast<const std::byte*>(
-                static_cast<char*>(_buf_base) + p.buf_idx * _entry_size);
+                static_cast<char*>(_sink->buf_base()) + p.buf_idx * _sink->entry_size());
             return Chunk{std::span<const std::byte>(base, p.len), 0};
         }
         if (_error != 0) {
@@ -146,10 +215,12 @@ private:
     void _return_checked_out() {
         if (_checked_out_idx >= 0) {
             io_uring_buf_ring_add(
-                _br, static_cast<char*>(_buf_base) + _checked_out_idx * _entry_size,
-                static_cast<unsigned int>(_entry_size), static_cast<unsigned short>(_checked_out_idx),
-                io_uring_buf_ring_mask(_entries), 0);
-            io_uring_buf_ring_advance(_br, 1);
+                _sink->buf_ring(),
+                static_cast<char*>(_sink->buf_base()) + _checked_out_idx * _sink->entry_size(),
+                static_cast<unsigned int>(_sink->entry_size()),
+                static_cast<unsigned short>(_checked_out_idx),
+                io_uring_buf_ring_mask(_sink->entries()), 0);
+            io_uring_buf_ring_advance(_sink->buf_ring(), 1);
             _checked_out_idx = -1;
         }
         _maybe_resubmit();
@@ -158,19 +229,11 @@ private:
     void _maybe_resubmit() {
         if (_needs_resubmit && _checked_out_idx < 0) {
             _needs_resubmit = false;
-            _submit_recv();
+            _sink->submit_recv();
         }
     }
 
-    Queue& _queue;
-    int _fd;
-    size_t _entry_size;
-    unsigned int _entries;
-    unsigned short _bgid;
-
-    void* _buf_base = nullptr;
-    size_t _buf_len = 0;
-    io_uring_buf_ring* _br = nullptr;
+    RecvSink* _sink;
 
     struct Pending {
         unsigned int buf_idx;
@@ -184,6 +247,19 @@ private:
     bool _needs_resubmit = false;
     std::coroutine_handle<> _waiter;
 };
+
+void RecvSink::on_cqe(int res, unsigned int flags) noexcept {
+    if (!(flags & IORING_CQE_F_MORE)) {
+        _live = false;
+    }
+    if (owner) {
+        owner->handle_cqe(res, flags);
+    } else if (!_live) {
+        // Orphaned (owner already destroyed) and the kernel confirms no
+        // more completions are coming for this op: safe to free now.
+        delete this;
+    }
+}
 
 } // namespace
 

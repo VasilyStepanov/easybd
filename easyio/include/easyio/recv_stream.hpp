@@ -32,9 +32,9 @@ public:
     struct Awaiter {
         RecvStream* stream;
 
-        bool await_ready() noexcept { return stream->_ready(); }
+        [[nodiscard]] bool await_ready() noexcept { return stream->_ready(); }
         void await_suspend(std::coroutine_handle<> h) noexcept { stream->_arm(h); }
-        Chunk await_resume() noexcept { return stream->_take(); }
+        [[nodiscard]] Chunk await_resume() noexcept { return stream->_take(); }
     };
 
     // Returns the next chunk of data (or an empty chunk on EOF, or a chunk

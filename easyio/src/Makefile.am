@@ -8,9 +8,11 @@ libeasyio_la_SOURCES = \
 	libc_queue.cpp \
 	libc_recv_stream.hpp \
 	libc_recv_stream.cpp \
+	framed_reader.cpp \
 	$(top_srcdir)/easyio/include/easyio/task.hpp \
 	$(top_srcdir)/easyio/include/easyio/queue.hpp \
-	$(top_srcdir)/easyio/include/easyio/recv_stream.hpp
+	$(top_srcdir)/easyio/include/easyio/recv_stream.hpp \
+	$(top_srcdir)/easyio/include/easyio/framed_reader.hpp
 # NOTE: automake commits to using libeasyio_la_CPPFLAGS/_LIBADD instead of
 # AM_CPPFLAGS/global LIBADD in the compile/link rules as soon as either is
 # assigned anywhere in this file, even inside an `if` block that may end up

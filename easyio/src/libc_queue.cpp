@@ -24,12 +24,12 @@ class AcceptAwaiter final : public FdOp {
 public:
     AcceptAwaiter(Queue& queue, int fd) : _queue(queue), _fd(fd) {}
 
-    bool await_ready() noexcept { return _try(); }
+    [[nodiscard]] bool await_ready() noexcept { return _try(); }
     void await_suspend(std::coroutine_handle<> h) noexcept {
         _handle = h;
         _queue._set_read_op(_fd, this);
     }
-    int await_resume() const noexcept { return _result; }
+    [[nodiscard]] int await_resume() const noexcept { return _result; }
 
 private:
     bool _try() noexcept {
@@ -79,12 +79,12 @@ public:
         }
     }
 
-    bool await_ready() const noexcept { return _done; }
+    [[nodiscard]] bool await_ready() const noexcept { return _done; }
     void await_suspend(std::coroutine_handle<> h) noexcept {
         _handle = h;
         _queue._push_write_op(_fd, this);
     }
-    int await_resume() const noexcept { return _result; }
+    [[nodiscard]] int await_resume() const noexcept { return _result; }
 
 private:
     bool on_ready() noexcept override {
@@ -115,12 +115,12 @@ public:
     SendAwaiter(Queue& queue, int fd, const void* buf, size_t size)
         : _queue(queue), _fd(fd), _buf(buf), _size(size) {}
 
-    bool await_ready() noexcept { return _try(); }
+    [[nodiscard]] bool await_ready() noexcept { return _try(); }
     void await_suspend(std::coroutine_handle<> h) noexcept {
         _handle = h;
         _queue._push_write_op(_fd, this);
     }
-    ssize_t await_resume() const noexcept { return _result; }
+    [[nodiscard]] ssize_t await_resume() const noexcept { return _result; }
 
 private:
     bool _try() noexcept {

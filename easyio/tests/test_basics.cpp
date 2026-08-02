@@ -1,10 +1,13 @@
+#include <easyio/framed_reader.hpp>
 #include <easyio/queue.hpp>
 #include <easyio/task.hpp>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -161,6 +164,76 @@ TEST_P(EasyioTest, SocketSendRecvStream) {
 
     ASSERT_EQ(received.size(), message.size());
     EXPECT_EQ(received, message);
+    ::close(listen_fd);
+}
+
+easyio::Task<void> framed_server(
+    easyio::Queue& queue, int listen_fd, std::vector<std::string>* out) {
+    int client_fd = co_await queue.accept(listen_fd);
+    auto stream = queue.recv_stream(client_fd, 4096, 4);
+    easyio::FramedReader reader(*stream);
+
+    std::vector<std::string> messages;
+    for (int i = 0; i < 5; ++i) {
+        auto len_span = co_await reader.read_exact(4);
+        uint32_t len;
+        std::memcpy(&len, len_span.data(), 4);
+        auto body_span = co_await reader.read_exact(len);
+        messages.emplace_back(reinterpret_cast<const char*>(body_span.data()), body_span.size());
+    }
+    *out = std::move(messages);
+    co_await queue.close(client_fd);
+}
+
+easyio::Task<void> framed_client(
+    easyio::Queue& queue, int fd, sockaddr_in addr, std::vector<std::string> messages) {
+    co_await queue.connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+
+    for (const auto& m : messages) {
+        auto len = static_cast<uint32_t>(m.size());
+        std::string frame(reinterpret_cast<char*>(&len), sizeof(len));
+        frame += m;
+
+        // Send in tiny, irregular pieces so chunk boundaries never line up
+        // with message boundaries -- exercises both "partial" (need more
+        // data) and "coalesced" (more than one message's worth already
+        // buffered) cases in FramedReader.
+        size_t off = 0;
+        while (off < frame.size()) {
+            size_t piece = std::min<size_t>(3, frame.size() - off);
+            size_t sent = 0;
+            while (sent < piece) {
+                sent += co_await queue.send(fd, frame.data() + off + sent, piece - sent);
+            }
+            off += piece;
+        }
+    }
+    co_await queue.close(fd);
+}
+
+TEST_P(EasyioTest, FramedReaderExactBoundaries) {
+    auto queue = easyio::Queue::create(GetParam(), 32);
+
+    uint16_t port = 0;
+    int listen_fd = make_listen_socket(&port);
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    easyio::set_nonblocking(client_fd);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    std::vector<std::string> expected{"a", "hello world", std::string(5000, 'z'), "", "last"};
+    std::vector<std::string> received;
+
+    run_pair(
+        *queue, framed_server(*queue, listen_fd, &received),
+        framed_client(*queue, client_fd, addr, expected));
+
+    EXPECT_EQ(received, expected);
     ::close(listen_fd);
 }
 
