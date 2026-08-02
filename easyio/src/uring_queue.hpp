@@ -28,7 +28,7 @@ public:
     Task<void> close(int fd) override;
     Task<size_t> pread(int fd, void* buf, size_t size, uint64_t offset) override;
     Task<size_t> pwrite(int fd, const void* buf, size_t size, uint64_t offset) override;
-    Task<void> fdatasync(int fd) override;
+    Task<size_t> pwrite_dsync(int fd, const void* buf, size_t size, uint64_t offset) override;
     Task<int> accept(int fd) override;
     Task<void> connect(int fd, const sockaddr* addr, socklen_t addrlen) override;
     Task<size_t> send(int fd, const void* buf, size_t size) override;

@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include "libc_recv_stream.hpp"
@@ -366,11 +367,13 @@ Task<size_t> Queue::pwrite(int fd, const void* buf, size_t size, uint64_t offset
     co_return static_cast<size_t>(r);
 }
 
-Task<void> Queue::fdatasync(int fd) {
-    if (::fdatasync(fd) < 0) {
-        throw_errno(errno, "fdatasync");
+Task<size_t> Queue::pwrite_dsync(int fd, const void* buf, size_t size, uint64_t offset) {
+    iovec iov{const_cast<void*>(buf), size};
+    ssize_t r = ::pwritev2(fd, &iov, 1, static_cast<off_t>(offset), RWF_DSYNC);
+    if (r < 0) {
+        throw_errno(errno, "pwrite_dsync");
     }
-    co_return;
+    co_return static_cast<size_t>(r);
 }
 
 Task<int> Queue::accept(int fd) {
