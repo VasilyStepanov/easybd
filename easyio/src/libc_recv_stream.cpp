@@ -134,7 +134,7 @@ private:
 } // namespace
 
 std::unique_ptr<RecvStream> make_recv_stream(
-    Queue& queue, int fd, size_t entry_size, unsigned int entries) {
+    Queue& queue, int fd, size_t entry_size, unsigned int entries, bool /*multishot*/) {
     return std::make_unique<RecvStreamImpl>(queue, fd, entry_size, entries);
 }
 

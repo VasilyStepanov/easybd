@@ -101,8 +101,18 @@ public:
     // entry_size * entries. Chunks handed out by the stream reference
     // backend-owned memory that stays valid only until the next next() call
     // completes.
+    //
+    // multishot selects between the io_uring backend's two recv strategies:
+    // true (the default) is one multishot recv op + a provided buffer ring
+    // (see RecvStream's own doc comment); false is one plain recv op in
+    // flight at a time, resubmitted per chunk -- the "ordinary recv"
+    // baseline multishot exists to avoid, kept as an option so the two can
+    // be benchmarked against each other (see --feature-multishot on the
+    // server/client CLIs). The libc backend has no multishot concept to
+    // begin with -- it already always behaves like the false case here --
+    // so it accepts and ignores this parameter.
     virtual std::unique_ptr<RecvStream> recv_stream(
-        int fd, size_t entry_size, unsigned int entries) = 0;
+        int fd, size_t entry_size, unsigned int entries, bool multishot = true) = 0;
 
     // Cancels every pending operation on fd (including a live recv_stream)
     // and arranges for their awaiting coroutines to be resumed with an

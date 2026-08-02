@@ -22,7 +22,12 @@ namespace easybd {
 // (pipelined, correlated by cid) -- mirrors the server's session design.
 class Client {
 public:
-    Client(const std::string& host, uint16_t port, easyio::Backend backend, unsigned int queue_depth);
+    // multishot_recv: see --feature-multishot on the fio engine / whatever
+    // else drives this client; only meaningful with backend ==
+    // easyio::Backend::IoUring (see Queue::recv_stream()'s doc comment).
+    Client(
+        const std::string& host, uint16_t port, easyio::Backend backend, unsigned int queue_depth,
+        bool multishot_recv);
     ~Client();
 
     Client(const Client&) = delete;
@@ -51,6 +56,7 @@ private:
     void fail_all_pending(int err);
 
     std::unique_ptr<easyio::Queue> _queue;
+    bool _multishot_recv;
     int _fd = -1;
     uint64_t _next_cid = 1;
     std::unordered_map<uint64_t, Pending> _pending;

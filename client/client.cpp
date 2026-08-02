@@ -36,8 +36,9 @@ unsigned int round_up_pow2(unsigned int v) {
 } // namespace
 
 Client::Client(
-    const std::string& host, uint16_t port, easyio::Backend backend, unsigned int queue_depth)
-    : _queue(easyio::Queue::create(backend, queue_depth)) {
+    const std::string& host, uint16_t port, easyio::Backend backend, unsigned int queue_depth,
+    bool multishot_recv)
+    : _queue(easyio::Queue::create(backend, queue_depth)), _multishot_recv(multishot_recv) {
     _fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (_fd < 0) {
         throw_errno(errno, "socket");
@@ -114,7 +115,7 @@ easyio::Task<void> Client::reader_loop() {
     // multiple in-flight large responses don't contend for the same
     // handful of slots either.
     auto stream = _queue->recv_stream(
-        _fd, EASYBD_MAX_PAYLOAD_SIZE, round_up_pow2(_queue->depth()));
+        _fd, EASYBD_MAX_PAYLOAD_SIZE, round_up_pow2(_queue->depth()), _multishot_recv);
     easyio::FramedReader reader(*stream);
 
     try {

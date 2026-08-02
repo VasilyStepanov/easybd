@@ -14,6 +14,10 @@ struct ServerConfig {
     easyio::Backend backend = easyio::Backend::Libc;
     unsigned int queue_depth = 128;
     unsigned int threads = 1;
+    // See --feature-multishot in main.cpp. Only meaningful for the
+    // io_uring backend; the libc backend ignores it (it has no multishot
+    // recv to begin with).
+    bool multishot_recv = false;
 };
 
 // Binds/listens, opens the backing file O_DIRECT, spawns `threads` worker

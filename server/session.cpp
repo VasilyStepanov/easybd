@@ -103,14 +103,17 @@ easyio::Task<void> tracked(easyio::Task<void> t, easyio::WaitGroup& wg) {
 } // namespace
 
 easyio::Task<void> handle_connection(
-    easyio::Queue& queue, int client_fd, int file_fd, uint64_t /*file_size*/) {
+    easyio::Queue& queue, int client_fd, int file_fd, uint64_t /*file_size*/,
+    bool multishot_recv) {
     easyio::set_nonblocking(client_fd);
     easyio::set_tcp_nodelay(client_fd);
     // entry_size: see Client::reader_loop()'s recv_stream() call -- large
     // (multi-MiB) write request bodies hit the same ring-refill cost here
     // that large read responses hit on the client side. entries: see
-    // kRecvStreamEntries above for why this isn't queue.depth().
-    auto stream = queue.recv_stream(client_fd, EASYBD_MAX_PAYLOAD_SIZE, kRecvStreamEntries);
+    // kRecvStreamEntries above for why this isn't queue.depth(). multishot:
+    // see --feature-multishot in server/main.cpp.
+    auto stream =
+        queue.recv_stream(client_fd, EASYBD_MAX_PAYLOAD_SIZE, kRecvStreamEntries, multishot_recv);
     easyio::FramedReader reader(*stream);
     easyio::Mutex send_mtx;
     easyio::WaitGroup wg;

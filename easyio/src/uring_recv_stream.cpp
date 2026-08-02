@@ -273,11 +273,160 @@ void RecvSink::on_cqe(int res, unsigned int flags) noexcept {
     }
 }
 
+class SingleShotRecvStreamImpl;
+
+// --feature-multishot off: the "ordinary recv" baseline the RecvStream doc
+// comment contrasts multishot against -- exactly one plain IORING_OP_RECV
+// in flight at a time, into a private (non-provided-buffer) buffer sized
+// entry_size, resubmitted only once the caller has reclaimed the previous
+// chunk (at the start of the next next() call, same contract every backend
+// follows). No buffer ring, no IOSQE_BUFFER_SELECT, no multishot flag --
+// this is the one-SQE-per-chunk cost multishot recv exists to avoid.
+// `entries` is accepted by the factory below for interface symmetry with
+// the multishot path but is meaningless here (there is never more than one
+// buffer/op in flight), so it's simply ignored.
+class SingleShotRecvSink final : public CqeSink {
+public:
+    SingleShotRecvSink(Queue& queue, int fd, size_t entry_size)
+        : _queue(queue), _fd(fd), _entry_size(entry_size) {
+        if (posix_memalign(&_buf, 4096, entry_size) != 0) {
+            throw std::bad_alloc();
+        }
+        submit_recv();
+    }
+
+    ~SingleShotRecvSink() { free(_buf); }
+
+    void submit_recv() {
+        io_uring_sqe* sqe = _queue._get_sqe();
+        io_uring_prep_recv(sqe, _fd, _buf, _entry_size, 0);
+        io_uring_sqe_set_data(sqe, static_cast<CqeSink*>(this));
+        _live = true;
+    }
+
+    // Same best-effort reasoning as RecvSink::request_cancel().
+    void request_cancel() noexcept {
+        try {
+            io_uring_sqe* sqe = _queue._get_sqe();
+            io_uring_prep_cancel(sqe, static_cast<CqeSink*>(this), 0);
+            io_uring_sqe_set_data(sqe, nullptr);
+        } catch (...) { // NOLINT(bugprone-empty-catch): deliberately best-effort
+        }
+    }
+
+    [[nodiscard]] bool live() const noexcept { return _live; }
+    void detach() noexcept { owner = nullptr; }
+    [[nodiscard]] void* buf() const noexcept { return _buf; }
+
+    SingleShotRecvStreamImpl* owner = nullptr;
+
+private:
+    void on_cqe(int res, unsigned int flags) noexcept override;
+
+    Queue& _queue;
+    int _fd;
+    size_t _entry_size;
+    void* _buf = nullptr;
+    bool _live = false;
+};
+
+class SingleShotRecvStreamImpl final : public RecvStream {
+public:
+    SingleShotRecvStreamImpl(Queue& queue, int fd, size_t entry_size)
+        : _sink(new SingleShotRecvSink(queue, fd, entry_size)) {
+        _sink->owner = this;
+    }
+
+    // Same detach-and-self-delete lifetime handling as RecvStreamImpl, just
+    // simpler: there is only ever one outstanding op to cancel and wait out,
+    // not a live multishot op that might still be mid-batch in this
+    // dispatch cycle.
+    ~SingleShotRecvStreamImpl() override {
+        _sink->detach();
+        if (_sink->live()) {
+            _sink->request_cancel();
+        } else {
+            delete _sink;
+        }
+    }
+
+    void handle_cqe(int res) noexcept {
+        if (res < 0) {
+            _error = -res;
+        } else if (res == 0) {
+            _eof = true;
+        } else {
+            _len = static_cast<unsigned int>(res);
+            _has_chunk = true;
+        }
+
+        if (_waiter && (_has_chunk || _eof || _error != 0)) {
+            std::exchange(_waiter, nullptr).resume();
+        }
+    }
+
+private:
+    bool _ready() noexcept override {
+        _reclaim();
+        return _has_chunk || _eof || _error != 0;
+    }
+
+    void _arm(std::coroutine_handle<> h) noexcept override { _waiter = h; }
+
+    Chunk _take() noexcept override {
+        if (_has_chunk) {
+            _has_chunk = false;
+            _checked_out = true;
+            return Chunk{
+                std::span<const std::byte>(
+                    reinterpret_cast<const std::byte*>(_sink->buf()), _len),
+                0};
+        }
+        if (_error != 0) {
+            return Chunk{{}, -_error};
+        }
+        return Chunk{{}, 0};
+    }
+
+    void _reclaim() {
+        if (_checked_out) {
+            _checked_out = false;
+            if (_error == 0 && !_eof) {
+                _sink->submit_recv();
+            }
+        }
+    }
+
+    SingleShotRecvSink* _sink;
+    unsigned int _len = 0;
+    bool _has_chunk = false;
+    bool _checked_out = false;
+    bool _eof = false;
+    int _error = 0;
+    std::coroutine_handle<> _waiter;
+};
+
+void SingleShotRecvSink::on_cqe(int res, unsigned int /*flags*/) noexcept {
+    _live = false; // a plain recv always completes exactly once
+    if (owner) {
+        owner->handle_cqe(res);
+    } else {
+        // Orphaned (owner already destroyed): this is the op's own terminal
+        // completion (single-shot never has a "more" flag), so it's always
+        // safe to free right here, unlike RecvSink which must wait for the
+        // specific CQE that clears IORING_CQE_F_MORE.
+        delete this;
+    }
+}
+
 } // namespace
 
 std::unique_ptr<RecvStream> make_recv_stream(
-    Queue& queue, int fd, size_t entry_size, unsigned int entries) {
-    return std::make_unique<RecvStreamImpl>(queue, fd, entry_size, entries);
+    Queue& queue, int fd, size_t entry_size, unsigned int entries, bool multishot) {
+    if (multishot) {
+        return std::make_unique<RecvStreamImpl>(queue, fd, entry_size, entries);
+    }
+    return std::make_unique<SingleShotRecvStreamImpl>(queue, fd, entry_size);
 }
 
 } // namespace easyio::uring

@@ -25,6 +25,9 @@ void print_usage(const char* argv0) {
         "  -q, --queue-type TYPE    io_uring or libc%s\n"
         "      --queue-depth N      per-worker queue depth (default: %u)\n"
         "  -j, --threads N          worker thread count (default: number of CPUs)\n"
+        "      --feature-multishot  use io_uring multishot recv (default: off, i.e.\n"
+        "                           an ordinary recv per chunk); no effect with\n"
+        "                           --queue-type libc\n"
         "  -h, --help               show this help and exit\n"
         "  -v, --version            show version and exit\n",
         argv0, easyio::io_uring_available() ? " (default: io_uring)" : " (only libc: built --without-liburing)",
@@ -84,6 +87,7 @@ int main(int argc, char** argv) {
         {"queue-type", required_argument, nullptr, 'q'},
         {"queue-depth", required_argument, nullptr, 'Q'},
         {"threads", required_argument, nullptr, 'j'},
+        {"feature-multishot", no_argument, nullptr, 'M'},
         {"help", no_argument, nullptr, 'h'},
         {"version", no_argument, nullptr, 'v'},
         {nullptr, 0, nullptr, 0},
@@ -115,6 +119,9 @@ int main(int argc, char** argv) {
             case 'j':
                 config.threads = static_cast<unsigned int>(std::strtoul(optarg, nullptr, 10));
                 break;
+            case 'M':
+                config.multishot_recv = true;
+                break;
             case 'h':
                 print_usage(argv[0]);
                 return 0;
@@ -142,11 +149,20 @@ int main(int argc, char** argv) {
             return 2;
         }
 
+        if (config.multishot_recv && config.backend == easyio::Backend::Libc) {
+            std::fprintf(
+                stderr,
+                "easybd-server: warning: --feature-multishot has no effect with "
+                "--queue-type libc\n");
+        }
+
         std::fprintf(
-            stderr, "easybd-server: listening on %s:%u, file=%s, backend=%s, threads=%u, depth=%u\n",
+            stderr,
+            "easybd-server: listening on %s:%u, file=%s, backend=%s, threads=%u, depth=%u, "
+            "recv=%s\n",
             config.bind_host.c_str(), config.bind_port, config.file_path.c_str(),
             std::string(easyio::backend_name(config.backend)).c_str(), config.threads,
-            config.queue_depth);
+            config.queue_depth, config.multishot_recv ? "multishot" : "ordinary");
 
         easybd::run_server(config);
     } catch (const std::exception& e) {
