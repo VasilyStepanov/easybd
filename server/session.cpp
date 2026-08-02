@@ -1,5 +1,6 @@
 #include "session.hpp"
 
+#include <cerrno>
 #include <cstring>
 #include <stdexcept>
 #include <system_error>
@@ -14,6 +15,27 @@ namespace easybd {
 
 namespace {
 
+// recv_stream()'s entries count must be a power of two (see its doc
+// comment) -- queue.depth() is a caller-supplied value (server's
+// --queue-size) with no such guarantee.
+unsigned int round_up_pow2(unsigned int v) {
+    unsigned int p = 1;
+    while (p < v) {
+        p <<= 1;
+    }
+    return p;
+}
+
+// Used for a request that fails validation before any actual I/O is
+// attempted (currently just an oversized read) -- same response shape as
+// handle_read/handle_write's own error path, just without the I/O.
+easyio::Task<void> send_error(
+    easyio::Queue& queue, int client_fd, easyio::Mutex& send_mtx, uint64_t cid, int err) {
+    EasyBDResponseHeader resp{cid, -static_cast<int64_t>(err)};
+    auto guard = co_await easyio::lock_guard(send_mtx);
+    co_await easyio::send_all(queue, client_fd, &resp, sizeof(resp));
+}
+
 easyio::Task<void> handle_write(
     easyio::Queue& queue, int client_fd, int file_fd, easyio::Mutex& send_mtx, uint64_t cid,
     uint64_t offset, AlignedBuffer payload) {
@@ -25,7 +47,7 @@ easyio::Task<void> handle_write(
         res = -static_cast<int64_t>(e.code().value());
     }
 
-    EasybdResponseHeader resp{cid, res};
+    EasyBDResponseHeader resp{cid, res};
     auto guard = co_await easyio::lock_guard(send_mtx);
     co_await easyio::send_all(queue, client_fd, &resp, sizeof(resp));
 }
@@ -42,7 +64,7 @@ easyio::Task<void> handle_read(
         res = -static_cast<int64_t>(e.code().value());
     }
 
-    EasybdResponseHeader resp{cid, res};
+    EasyBDResponseHeader resp{cid, res};
     auto guard = co_await easyio::lock_guard(send_mtx);
     if (res > 0) {
         co_await easyio::send_all(
@@ -72,18 +94,36 @@ easyio::Task<void> handle_connection(
     easyio::Queue& queue, int client_fd, int file_fd, uint64_t /*file_size*/) {
     easyio::set_nonblocking(client_fd);
     easyio::set_tcp_nodelay(client_fd);
-    auto stream = queue.recv_stream(client_fd, 1U << 16, 8);
+    // See Client::reader_loop()'s recv_stream() call for the sizing
+    // rationale: large (multi-MiB) write request bodies hit the same
+    // ring-refill cost here that large read responses hit on the client
+    // side. queue.depth() is this worker's overall --queue-size, not a
+    // per-connection iodepth (the protocol has no notion of the latter),
+    // but it's the only signal available for "how much concurrent I/O
+    // should this worker be ready for" and scales the same way.
+    auto stream = queue.recv_stream(
+        client_fd, EASYBD_MAX_PAYLOAD_SIZE, round_up_pow2(queue.depth()));
     easyio::FramedReader reader(*stream);
     easyio::Mutex send_mtx;
     easyio::WaitGroup wg;
 
     try {
         for (;;) {
-            auto header_span = co_await reader.read_exact(sizeof(EasybdRequestHeader));
-            EasybdRequestHeader req; // NOLINT(cppcoreguidelines-pro-type-member-init)
+            auto header_span = co_await reader.read_exact(sizeof(EasyBDRequestHeader));
+            EasyBDRequestHeader req; // NOLINT(cppcoreguidelines-pro-type-member-init)
             std::memcpy(&req, header_span.data(), sizeof(req));
 
             if (req.op == EASYBD_OP_WRITE) {
+                if (req.size > EASYBD_MAX_PAYLOAD_SIZE) {
+                    // Can't just respond with an error and move on: the
+                    // client is about to send req.size bytes of payload
+                    // right after this header regardless of what we do, and
+                    // skipping/not-reading them would desync framing for
+                    // whatever request comes next on this connection. Ending
+                    // the connection is the only safe response.
+                    throw std::runtime_error(
+                        "easybd: write request exceeds EASYBD_MAX_PAYLOAD_SIZE");
+                }
                 auto payload_span = co_await reader.read_exact(req.size);
                 AlignedBuffer buf(req.size);
                 std::memcpy(buf.data(), payload_span.data(), req.size);
@@ -95,9 +135,18 @@ easyio::Task<void> handle_connection(
                     wg));
             } else if (req.op == EASYBD_OP_READ) {
                 wg.add();
-                easyio::spawn(tracked(
-                    handle_read(queue, client_fd, file_fd, send_mtx, req.cid, req.offset, req.size),
-                    wg));
+                if (req.size > EASYBD_MAX_PAYLOAD_SIZE) {
+                    // A read request has no payload of its own following it
+                    // on the wire, so framing isn't at risk here -- this can
+                    // just be reported as an ordinary per-request error.
+                    easyio::spawn(
+                        tracked(send_error(queue, client_fd, send_mtx, req.cid, EMSGSIZE), wg));
+                } else {
+                    easyio::spawn(tracked(
+                        handle_read(
+                            queue, client_fd, file_fd, send_mtx, req.cid, req.offset, req.size),
+                        wg));
+                }
             } else {
                 throw std::runtime_error("easybd: invalid request op");
             }

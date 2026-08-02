@@ -23,6 +23,16 @@ void throw_errno(int err, const char* what) {
     throw std::system_error(err, std::generic_category(), what);
 }
 
+// recv_stream()'s entries count must be a power of two (see its doc
+// comment) -- depth is a caller-supplied iodepth with no such guarantee.
+unsigned int round_up_pow2(unsigned int v) {
+    unsigned int p = 1;
+    while (p < v) {
+        p <<= 1;
+    }
+    return p;
+}
+
 } // namespace
 
 Client::Client(
@@ -96,13 +106,21 @@ easyio::Task<void> Client::connect_task(
 }
 
 easyio::Task<void> Client::reader_loop() {
-    auto stream = _queue->recv_stream(_fd, 1U << 16, 8);
+    // One entry per queue slot, each big enough to hold one full max-size
+    // message: any single read response fits in one entry regardless of
+    // its size (no mid-message ring cycling -- each cycle costs its own
+    // io_uring_enter/recv() round trip, see the profiling notes in git
+    // history), and entries scales with the caller's own iodepth so
+    // multiple in-flight large responses don't contend for the same
+    // handful of slots either.
+    auto stream = _queue->recv_stream(
+        _fd, EASYBD_MAX_PAYLOAD_SIZE, round_up_pow2(_queue->depth()));
     easyio::FramedReader reader(*stream);
 
     try {
         for (;;) {
-            auto hdr_span = co_await reader.read_exact(sizeof(EasybdResponseHeader));
-            EasybdResponseHeader resp; // NOLINT(cppcoreguidelines-pro-type-member-init)
+            auto hdr_span = co_await reader.read_exact(sizeof(EasyBDResponseHeader));
+            EasyBDResponseHeader resp; // NOLINT(cppcoreguidelines-pro-type-member-init)
             std::memcpy(&resp, hdr_span.data(), sizeof(resp));
 
             auto it = _pending.find(resp.cid);
@@ -143,7 +161,7 @@ easyio::Task<void> Client::reader_loop() {
 
 easyio::Task<void> Client::send_request(
     uint64_t cid, uint64_t offset, uint64_t size, uint8_t op, const void* payload) {
-    EasybdRequestHeader req{cid, offset, size, op};
+    EasyBDRequestHeader req{cid, offset, size, op};
     auto guard = co_await easyio::lock_guard(_send_mtx);
     try {
         if (op == EASYBD_OP_WRITE) {
@@ -178,7 +196,10 @@ void Client::fail_all_pending(int err) {
     }
 }
 
-int Client::pread(void* buf, size_t size, uint64_t offset, EasybdCallback cb, void* user_data) {
+int Client::pread(void* buf, size_t size, uint64_t offset, EasyBDCallback cb, void* user_data) {
+    if (size > EASYBD_MAX_PAYLOAD_SIZE) {
+        return -EMSGSIZE;
+    }
     uint64_t cid = _next_cid++;
     _pending[cid] = Pending{true, buf, cb, user_data};
     easyio::spawn(send_request(cid, offset, size, EASYBD_OP_READ, nullptr));
@@ -186,7 +207,10 @@ int Client::pread(void* buf, size_t size, uint64_t offset, EasybdCallback cb, vo
 }
 
 int Client::pwrite(
-    const void* buf, size_t size, uint64_t offset, EasybdCallback cb, void* user_data) {
+    const void* buf, size_t size, uint64_t offset, EasyBDCallback cb, void* user_data) {
+    if (size > EASYBD_MAX_PAYLOAD_SIZE) {
+        return -EMSGSIZE;
+    }
     uint64_t cid = _next_cid++;
     _pending[cid] = Pending{false, nullptr, cb, user_data};
     easyio::spawn(send_request(cid, offset, size, EASYBD_OP_WRITE, buf));
