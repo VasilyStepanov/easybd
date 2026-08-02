@@ -1,0 +1,181 @@
+#include <easyio/queue.hpp>
+#include <easyio/task.hpp>
+
+#include <cstdio>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <gtest/gtest.h>
+
+namespace {
+
+// Drives two concurrent tasks to completion on one Queue, propagating the
+// first exception either raised (test assertions inside the tasks throw).
+easyio::Task<void> track(
+    easyio::Task<void> t, int& remaining, easyio::Queue& queue, std::exception_ptr& err) {
+    try {
+        co_await std::move(t);
+    } catch (...) {
+        err = std::current_exception();
+    }
+    if (--remaining == 0) {
+        queue.stop();
+    }
+}
+
+void run_pair(easyio::Queue& queue, easyio::Task<void> a, easyio::Task<void> b) {
+    int remaining = 2;
+    std::exception_ptr err_a, err_b;
+    easyio::spawn(track(std::move(a), remaining, queue, err_a));
+    easyio::spawn(track(std::move(b), remaining, queue, err_b));
+    queue.run();
+    if (err_a) {
+        std::rethrow_exception(err_a);
+    }
+    if (err_b) {
+        std::rethrow_exception(err_b);
+    }
+}
+
+easyio::Task<void> file_roundtrip(easyio::Queue& queue, std::string path) {
+    static const char msg[] = "hello easyio";
+
+    int fd = co_await queue.open(path.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0600);
+    size_t written = co_await queue.pwrite(fd, msg, sizeof(msg), 0);
+    if (written != sizeof(msg)) {
+        throw std::runtime_error("short write");
+    }
+
+    char buf[sizeof(msg)] = {};
+    size_t got = co_await queue.pread(fd, buf, sizeof(buf), 0);
+    if (got != sizeof(msg) || std::memcmp(buf, msg, sizeof(msg)) != 0) {
+        throw std::runtime_error("read back mismatch");
+    }
+
+    co_await queue.close(fd);
+}
+
+easyio::Task<void> server_echo_one(easyio::Queue& queue, int listen_fd, std::string* out) {
+    int client_fd = co_await queue.accept(listen_fd);
+    auto stream = queue.recv_stream(client_fd, 4096, 4);
+
+    std::string data;
+    for (;;) {
+        auto chunk = co_await stream->next();
+        if (chunk.error != 0) {
+            throw std::system_error(-chunk.error, std::generic_category(), "recv");
+        }
+        if (chunk.data.empty()) {
+            break;
+        }
+        data.append(reinterpret_cast<const char*>(chunk.data.data()), chunk.data.size());
+    }
+
+    *out = std::move(data);
+    co_await queue.close(client_fd);
+}
+
+easyio::Task<void> client_send_one(easyio::Queue& queue, int fd, sockaddr_in addr, std::string msg) {
+    co_await queue.connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+    size_t off = 0;
+    while (off < msg.size()) {
+        off += co_await queue.send(fd, msg.data() + off, msg.size() - off);
+    }
+    co_await queue.close(fd);
+}
+
+int make_listen_socket(uint16_t* out_port) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        throw std::system_error(errno, std::generic_category(), "socket");
+    }
+    int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        throw std::system_error(errno, std::generic_category(), "bind");
+    }
+    if (::listen(fd, 16) < 0) {
+        throw std::system_error(errno, std::generic_category(), "listen");
+    }
+    socklen_t len = sizeof(addr);
+    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) < 0) {
+        throw std::system_error(errno, std::generic_category(), "getsockname");
+    }
+    *out_port = ntohs(addr.sin_port);
+    easyio::set_nonblocking(fd);
+    return fd;
+}
+
+class EasyioTest : public ::testing::TestWithParam<easyio::Backend> {};
+
+TEST_P(EasyioTest, FileReadWriteRoundtrip) {
+    auto queue = easyio::Queue::create(GetParam(), 32);
+    char path[] = "/tmp/easyio_test_XXXXXX";
+    int fd = ::mkstemp(path);
+    ASSERT_GE(fd, 0);
+    ::close(fd);
+
+    int remaining = 1;
+    std::exception_ptr err;
+    easyio::spawn(track(file_roundtrip(*queue, path), remaining, *queue, err));
+    queue->run();
+    ::unlink(path);
+    if (err) {
+        std::rethrow_exception(err);
+    }
+}
+
+TEST_P(EasyioTest, SocketSendRecvStream) {
+    auto queue = easyio::Queue::create(GetParam(), 32);
+
+    uint16_t port = 0;
+    int listen_fd = make_listen_socket(&port);
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    easyio::set_nonblocking(client_fd);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    std::string received;
+    std::string message(70000, 'x'); // larger than one recv_stream entry, forces >1 chunk
+
+    run_pair(
+        *queue, server_echo_one(*queue, listen_fd, &received),
+        client_send_one(*queue, client_fd, addr, message));
+
+    ASSERT_EQ(received.size(), message.size());
+    EXPECT_EQ(received, message);
+    ::close(listen_fd);
+}
+
+std::vector<easyio::Backend> available_backends() {
+    std::vector<easyio::Backend> backends{easyio::Backend::Libc};
+    if (easyio::io_uring_available()) {
+        backends.push_back(easyio::Backend::IoUring);
+    }
+    return backends;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Backends, EasyioTest, ::testing::ValuesIn(available_backends()),
+    [](const ::testing::TestParamInfo<easyio::Backend>& info) {
+        return std::string(easyio::backend_name(info.param));
+    });
+
+} // namespace

@@ -67,3 +67,22 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Autotools generated files (run ./autogen.sh && ./configure to regenerate)
+/configure
+/configure~
+/aclocal.m4
+/autom4te.cache/
+/config.status
+/config.log
+/stamp-h1
+/build-aux/
+/m4/*.m4
+/libtool
+Makefile.in
+.deps/
+.libs/
+*.trs
+*.test
+test-suite.log
+/easyio/tests/test_all
