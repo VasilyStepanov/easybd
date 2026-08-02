@@ -77,12 +77,15 @@ public:
     virtual Task<size_t> pread(int fd, void* buf, size_t size, uint64_t offset) = 0;
     virtual Task<size_t> pwrite(int fd, const void* buf, size_t size, uint64_t offset) = 0;
 
-    // Flushes fd's data (not necessarily metadata -- see fdatasync(2)) to
-    // the storage device. A pwrite() completing is not by itself a
+    // Like pwrite(), but the write isn't complete until the data has been
+    // flushed to the storage device (RWF_DSYNC, i.e. per-write O_DSYNC) --
+    // one syscall/SQE that both writes and durably commits, instead of a
+    // pwrite() followed by a separate fdatasync() (two round trips, and on
+    // io_uring two SQEs/CQEs). A pwrite() completing is not by itself a
     // durability guarantee: O_DIRECT only bypasses the page cache, it says
     // nothing about a volatile write cache the underlying device may still
-    // have, which fdatasync()'s implicit flush/FUA is what actually forces.
-    virtual Task<void> fdatasync(int fd) = 0;
+    // have, which RWF_DSYNC's implicit flush/FUA is what actually forces.
+    virtual Task<size_t> pwrite_dsync(int fd, const void* buf, size_t size, uint64_t offset) = 0;
 
     virtual Task<int> accept(int fd) = 0;
     virtual Task<void> connect(int fd, const sockaddr* addr, socklen_t addrlen) = 0;

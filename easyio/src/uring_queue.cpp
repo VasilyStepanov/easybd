@@ -5,6 +5,7 @@
 #include <utility>
 
 #include <fcntl.h>
+#include <linux/fs.h>
 
 #include "uring_recv_stream.hpp"
 
@@ -197,14 +198,15 @@ Task<size_t> Queue::pwrite(int fd, const void* buf, size_t size, uint64_t offset
     co_return static_cast<size_t>(res);
 }
 
-Task<void> Queue::fdatasync(int fd) {
+Task<size_t> Queue::pwrite_dsync(int fd, const void* buf, size_t size, uint64_t offset) {
     int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
-        io_uring_prep_fsync(sqe, fd, IORING_FSYNC_DATASYNC);
+        io_uring_prep_write(sqe, fd, buf, size, offset);
+        sqe->rw_flags |= RWF_DSYNC;
     });
     if (res < 0) {
-        throw_errno(res, "fdatasync");
+        throw_errno(res, "pwrite_dsync");
     }
-    co_return;
+    co_return static_cast<size_t>(res);
 }
 
 Task<int> Queue::accept(int fd) {

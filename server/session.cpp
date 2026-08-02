@@ -46,13 +46,14 @@ easyio::Task<void> handle_write(
     uint64_t offset, AlignedBuffer payload) {
     int64_t res = 0;
     try {
-        size_t written = co_await queue.pwrite(file_fd, payload.data(), payload.size(), offset);
-        // A successful pwrite() with O_DIRECT only means the page cache was
-        // bypassed, not that the backing device's own volatile write cache
-        // has been flushed -- without this, res>0 would be lying about
-        // durability. If the flush itself fails, the write cannot be
-        // reported as successful even though the data reached the device.
-        co_await queue.fdatasync(file_fd);
+        // pwrite_dsync(), not pwrite(): a plain pwrite() completing with
+        // O_DIRECT only means the page cache was bypassed, not that the
+        // backing device's own volatile write cache has been flushed --
+        // without that, res>0 would be lying about durability. RWF_DSYNC
+        // gets both in one syscall/SQE instead of a separate fdatasync()
+        // round trip.
+        size_t written =
+            co_await queue.pwrite_dsync(file_fd, payload.data(), payload.size(), offset);
         res = static_cast<int64_t>(written);
     } catch (const std::system_error& e) {
         res = -static_cast<int64_t>(e.code().value());
