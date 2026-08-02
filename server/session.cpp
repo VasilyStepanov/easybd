@@ -69,6 +69,7 @@ easyio::Task<void> tracked(easyio::Task<void> t, easyio::WaitGroup& wg) {
 easyio::Task<void> handle_connection(
     easyio::Queue& queue, int client_fd, int file_fd, uint64_t /*file_size*/) {
     easyio::set_nonblocking(client_fd);
+    easyio::set_tcp_nodelay(client_fd);
     auto stream = queue.recv_stream(client_fd, 1U << 16, 8);
     easyio::FramedReader reader(*stream);
     easyio::Mutex send_mtx;

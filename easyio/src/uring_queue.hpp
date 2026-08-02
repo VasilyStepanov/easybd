@@ -34,8 +34,7 @@ public:
     std::unique_ptr<RecvStream> recv_stream(
         int fd, size_t entry_size, unsigned int entries) override;
     void cancel_fd(int fd) override;
-    void run(int timeout_ms = -1) override;
-    void stop() override;
+    void step(int timeout_ms = -1) override;
 
     // Internal API for the SqeAwaiter/RecvStreamImpl helper classes defined
     // in the .cpp files (they live in anonymous namespaces there, so a
@@ -49,7 +48,6 @@ private:
     void _dispatch();
 
     io_uring _ring{};
-    bool _stop_requested = false;
 };
 
 } // namespace easyio::uring

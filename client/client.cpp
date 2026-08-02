@@ -33,6 +33,7 @@ Client::Client(
         throw_errno(errno, "socket");
     }
     easyio::set_nonblocking(_fd);
+    easyio::set_tcp_nodelay(_fd);
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -48,21 +49,13 @@ Client::Client(
     // Block until connect() finishes -- easybd_client_create() is
     // documented as a blocking call, so pump the queue synchronously here
     // rather than exposing partial-connection state to the caller.
-    //
-    // Deliberately run(200) in a loop rather than run(-1): once connect()
-    // finishes, nothing else is registered on the queue, so a single
-    // run(-1) call would poll() with zero fds and an infinite timeout and
-    // never return (there's nothing left to ever make it ready). A bounded
-    // per-call timeout guarantees run() keeps handing control back so this
-    // loop's own condition gets rechecked -- the same reason the server's
-    // shutdown loop uses a timeout instead of relying on Queue::stop()
-    // (which is a one-shot, permanent flag, not something to toggle
-    // per-wait on a queue this object goes on to reuse for its whole
-    // lifetime).
+    // step(-1) waits for exactly one completion and returns; since connect
+    // is the only thing registered on a freshly-created queue, that one
+    // completion is always the connect itself.
     while (!connected) { // NOLINT(bugprone-infinite-loop): connected is set by
-        // connect_task, resumed from inside run() -- not visible to the
+        // connect_task, resumed from inside step() -- not visible to the
         // analyzer through the coroutine/reference indirection.
-        _queue->run(200);
+        _queue->step(-1);
     }
     if (connect_err) {
         ::close(_fd);
@@ -190,7 +183,7 @@ int Client::pwrite(
 
 int Client::wait(int timeout_ms) {
     size_t before = _total_dispatched;
-    _queue->run(timeout_ms);
+    _queue->step(timeout_ms);
     return static_cast<int>(_total_dispatched - before);
 }
 

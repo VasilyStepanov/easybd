@@ -65,7 +65,17 @@ Queue::~Queue() {
 io_uring_sqe* Queue::_get_sqe() {
     io_uring_sqe* sqe = io_uring_get_sqe(&_ring);
     if (!sqe) {
-        throw_errno(-ENOBUFS, "io_uring_get_sqe");
+        // The SQ ring is full of not-yet-submitted entries (this is a
+        // routine occurrence with a small queue depth, not a real error) --
+        // flush them to the kernel to free up slots and retry once.
+        int ret = io_uring_submit(&_ring);
+        if (ret < 0) {
+            throw_errno(ret, "io_uring_submit");
+        }
+        sqe = io_uring_get_sqe(&_ring);
+        if (!sqe) {
+            throw_errno(-ENOBUFS, "io_uring_get_sqe");
+        }
     }
     return sqe;
 }
@@ -84,39 +94,33 @@ void Queue::_dispatch() {
     io_uring_cq_advance(&_ring, nr);
 }
 
-void Queue::run(int timeout_ms) {
-    while (!_stop_requested) {
-        int ret;
-        if (timeout_ms < 0) {
-            ret = io_uring_submit_and_wait(&_ring, 1);
-        } else {
-            __kernel_timespec ts{};
-            ts.tv_sec = timeout_ms / 1000;
-            ts.tv_nsec = static_cast<long long>(timeout_ms % 1000) * 1000000LL;
-            io_uring_cqe* cqe = nullptr;
-            ret = io_uring_submit_and_wait_timeout(&_ring, &cqe, 1, &ts, nullptr);
-            if (ret == -ETIME) {
-                // Nothing completed within timeout_ms -- reap anything that
-                // did land right at the boundary, then let the caller
-                // decide whether to call run() again (e.g. after checking
-                // a shutdown flag).
-                _dispatch();
-                return;
-            }
+void Queue::step(int timeout_ms) {
+    // Exactly one wait-then-dispatch cycle -- see queue.hpp for why this
+    // must not loop internally until nothing-left-to-do.
+    int ret;
+    if (timeout_ms < 0) {
+        ret = io_uring_submit_and_wait(&_ring, 1);
+    } else {
+        __kernel_timespec ts{};
+        ts.tv_sec = timeout_ms / 1000;
+        ts.tv_nsec = static_cast<long long>(timeout_ms % 1000) * 1000000LL;
+        io_uring_cqe* cqe = nullptr;
+        ret = io_uring_submit_and_wait_timeout(&_ring, &cqe, 1, &ts, nullptr);
+        if (ret == -ETIME) {
+            // Nothing completed within timeout_ms -- reap anything that did
+            // land right at the boundary, then return either way.
+            _dispatch();
+            return;
         }
-        if (ret < 0) {
-            if (ret == -EINTR) {
-                // Let the caller decide whether to resume pumping --
-                // silently retrying here would make run() uninterruptible.
-                return;
-            }
-            throw_errno(ret, "io_uring_submit_and_wait");
-        }
-        _dispatch();
     }
+    if (ret < 0) {
+        if (ret == -EINTR) {
+            return;
+        }
+        throw_errno(ret, "io_uring_submit_and_wait");
+    }
+    _dispatch();
 }
-
-void Queue::stop() { _stop_requested = true; }
 
 void Queue::cancel_fd(int fd) {
     io_uring_sqe* sqe = _get_sqe();

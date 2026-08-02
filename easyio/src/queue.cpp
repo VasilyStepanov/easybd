@@ -5,6 +5,8 @@
 #include <system_error>
 
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #ifdef EASYIO_WITH_LIBURING
 #include "uring_queue.hpp"
@@ -38,6 +40,13 @@ void set_nonblocking(int fd) {
     }
     if (::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
         throw std::system_error(errno, std::generic_category(), "fcntl(F_SETFL)");
+    }
+}
+
+void set_tcp_nodelay(int fd) {
+    int one = 1;
+    if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+        throw std::system_error(errno, std::generic_category(), "setsockopt(TCP_NODELAY)");
     }
 }
 
