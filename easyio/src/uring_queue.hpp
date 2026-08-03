@@ -49,7 +49,21 @@ public:
 private:
     void _dispatch();
 
+    // Lazily registers fd as this ring's single fixed file (index 0) on
+    // first use, so pread/pwrite/pwrite_dsync can pass IOSQE_FIXED_FILE and
+    // skip the kernel's per-submission fdget/fdput on the backing file --
+    // cheap (fixed file lookup is a plain array index) but only actually
+    // saves that one refcount op per op, not the io-wq worker-thread hand-
+    // off that O_DIRECT writes still need on this hardware regardless.
+    // Returns whether fd is now (or already was) the registered fixed
+    // file. Our only real caller (session.cpp) always passes the same
+    // backing-file fd for a Queue's whole lifetime, so registration happens
+    // at most once per Queue; a second, different fd here just falls back
+    // to plain (non-fixed) I/O rather than trying to re-register.
+    bool _use_fixed_file(int fd) noexcept;
+
     io_uring _ring{};
+    int _registered_fd = -1;
 };
 
 } // namespace easyio::uring
