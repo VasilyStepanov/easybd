@@ -23,15 +23,16 @@ void throw_errno(int err, const char* what) {
     throw std::system_error(err, std::generic_category(), what);
 }
 
-// recv_stream()'s entries count must be a power of two (see its doc
-// comment) -- depth is a caller-supplied iodepth with no such guarantee.
-unsigned int round_up_pow2(unsigned int v) {
-    unsigned int p = 1;
-    while (p < v) {
-        p <<= 1;
-    }
-    return p;
-}
+// recv_stream() ring sizing: entry_size close to what a single TCP recv
+// actually delivers, not EASYBD_MAX_PAYLOAD_SIZE (one whole max-size
+// message) -- a provided-buffer-ring slot is consumed whole per completion
+// regardless of how many bytes it actually holds, so slots sized for the
+// rare worst case (one giant message) exhaust after just a handful of
+// ordinary-sized chunks, forcing far more resubmits than slots sized for
+// the common case would. Matches rawstor's librawstorio (see
+// ost_session.cpp/ost/session.cpp), which uses these same two constants.
+constexpr size_t kRecvEntrySize = 1u << 17; // 128 KiB
+constexpr unsigned int kRecvEntries = 64 * 4; // 256 -- 32 MiB ring total
 
 } // namespace
 
@@ -107,15 +108,12 @@ easyio::Task<void> Client::connect_task(
 }
 
 easyio::Task<void> Client::reader_loop() {
-    // One entry per queue slot, each big enough to hold one full max-size
-    // message: any single read response fits in one entry regardless of
-    // its size (no mid-message ring cycling -- each cycle costs its own
-    // io_uring_enter/recv() round trip, see the profiling notes in git
-    // history), and entries scales with the caller's own iodepth so
-    // multiple in-flight large responses don't contend for the same
-    // handful of slots either.
-    auto stream = _queue->recv_stream(
-        _fd, EASYBD_MAX_PAYLOAD_SIZE, round_up_pow2(_queue->depth()), _multishot_recv);
+    // See kRecvEntrySize/kRecvEntries above. A response larger than one
+    // entry is simply reassembled from several chunks -- FramedReader
+    // already has to handle chunks splitting or coalescing message
+    // boundaries regardless of entry size, so there's no correctness
+    // reason to size entries off the max message size.
+    auto stream = _queue->recv_stream(_fd, kRecvEntrySize, kRecvEntries, _multishot_recv);
     easyio::FramedReader reader(*stream);
 
     try {

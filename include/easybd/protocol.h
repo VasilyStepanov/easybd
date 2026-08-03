@@ -33,15 +33,15 @@
  * with -EINVAL, exactly as a raw O_DIRECT pread/pwrite would.
  *
  * `size` (request) and `res` (a positive read response) must not exceed
- * EASYBD_MAX_PAYLOAD_SIZE. This isn't just a sanity limit: the client and
- * server each size their receive-side buffering to comfortably hold one
- * payload of this size without needing to cycle their provided-buffer ring
- * mid-message (see recv_stream() call sites in client.cpp/session.cpp) --
- * a larger payload would still be handled correctly, just at the higher
- * per-op syscall cost that sizing is specifically meant to avoid. A request
- * over the limit gets an EMSGSIZE error response (write) or is rejected
- * before it can even be issued (read, checked client-side since the size
- * comes from the caller, not the wire).
+ * EASYBD_MAX_PAYLOAD_SIZE, which is purely a sanity/DoS limit on how much
+ * one request can ask for -- it has no bearing on how the client/server
+ * size their recv_stream() ring buffers (see the kRecvEntrySize/
+ * kRecvEntries constants in client.cpp/session.cpp), since a response
+ * larger than one ring entry is simply reassembled from several chunks
+ * like any other. A request over the limit gets an EMSGSIZE error
+ * response (write) or is rejected before it can even be issued (read,
+ * checked client-side since the size comes from the caller, not the
+ * wire).
  */
 
 #include <stdint.h>
