@@ -43,10 +43,18 @@ int easybd_io_uring_available(void);
  * responses off this connection, zero for an ordinary recv per chunk (see
  * easyio's Queue::recv_stream() doc comment for what the difference is).
  * Only meaningful with backend == EASYBD_BACKEND_IO_URING; ignored (there
- * is no multishot recv to begin with) with EASYBD_BACKEND_LIBC. */
+ * is no multishot recv to begin with) with EASYBD_BACKEND_LIBC.
+ *
+ * sync_writes: nonzero to have easybd_client_pwrite() request durability
+ * (the server flushes to the storage device before responding) at the
+ * cost of write latency/throughput, zero for a plain write with no such
+ * guarantee. Meant to mirror whatever "synchronous write IO" setting the
+ * caller itself exposes (e.g. fio's --sync) rather than being a separate
+ * ad hoc easybd setting -- see protocol.h's doc comment on
+ * EASYBD_OP_WRITE vs EASYBD_OP_WRITE_SYNC. */
 int easybd_client_create(
     const char* host, uint16_t port, EasyBDBackend backend, unsigned int queue_depth,
-    int feature_multishot, EasyBDClient** out);
+    int feature_multishot, int sync_writes, EasyBDClient** out);
 
 /* Closes the connection. Any requests still in flight at this point never
  * get their callback invoked. */

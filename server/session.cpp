@@ -45,17 +45,23 @@ easyio::Task<void> send_error(
 
 easyio::Task<void> handle_write(
     easyio::Queue& queue, int client_fd, int file_fd, easyio::Mutex& send_mtx, uint64_t cid,
-    uint64_t offset, AlignedBuffer payload) {
+    uint64_t offset, AlignedBuffer payload, bool durable) {
     int64_t res = 0;
     try {
-        // pwrite_dsync(), not pwrite(): a plain pwrite() completing with
-        // O_DIRECT only means the page cache was bypassed, not that the
-        // backing device's own volatile write cache has been flushed --
-        // without that, res>0 would be lying about durability. RWF_DSYNC
-        // gets both in one syscall/SQE instead of a separate fdatasync()
-        // round trip.
-        size_t written =
-            co_await queue.pwrite_dsync(file_fd, payload.data(), payload.size(), offset);
+        // durable (EASYBD_OP_WRITE_SYNC) picks pwrite_dsync() over plain
+        // pwrite(): a plain pwrite() completing with O_DIRECT only means
+        // the page cache was bypassed, not that the backing device's own
+        // volatile write cache has been flushed -- without that, res>0
+        // would be lying about durability. RWF_DSYNC gets both in one
+        // syscall/SQE instead of a separate fdatasync() round trip. See
+        // protocol.h's doc comment for why this is a per-request choice
+        // (mirrors fio's own --sync) rather than always on.
+        size_t written;
+        if (durable) {
+            written = co_await queue.pwrite_dsync(file_fd, payload.data(), payload.size(), offset);
+        } else {
+            written = co_await queue.pwrite(file_fd, payload.data(), payload.size(), offset);
+        }
         res = static_cast<int64_t>(written);
     } catch (const std::system_error& e) {
         res = -static_cast<int64_t>(e.code().value());
@@ -122,7 +128,7 @@ easyio::Task<void> handle_connection(
             EasyBDRequestHeader req; // NOLINT(cppcoreguidelines-pro-type-member-init)
             std::memcpy(&req, header_span.data(), sizeof(req));
 
-            if (req.op == EASYBD_OP_WRITE) {
+            if (req.op == EASYBD_OP_WRITE || req.op == EASYBD_OP_WRITE_SYNC) {
                 if (req.size > EASYBD_MAX_PAYLOAD_SIZE) {
                     // Can't just respond with an error and move on: the
                     // client is about to send req.size bytes of payload
@@ -139,8 +145,8 @@ easyio::Task<void> handle_connection(
                 wg.add();
                 easyio::spawn(tracked(
                     handle_write(
-                        queue, client_fd, file_fd, send_mtx, req.cid, req.offset,
-                        std::move(buf)),
+                        queue, client_fd, file_fd, send_mtx, req.cid, req.offset, std::move(buf),
+                        /*durable=*/req.op == EASYBD_OP_WRITE_SYNC),
                     wg));
             } else if (req.op == EASYBD_OP_READ) {
                 wg.add();
