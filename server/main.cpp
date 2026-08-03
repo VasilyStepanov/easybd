@@ -28,6 +28,10 @@ void print_usage(const char* argv0) {
         "      --feature-multishot  use io_uring multishot recv (default: off, i.e.\n"
         "                           an ordinary recv per chunk); no effect with\n"
         "                           --queue-type libc\n"
+        "      --direct 0|1         open the backing file O_DIRECT or not (default: 1).\n"
+        "                           Real deployments should leave this at 1 --\n"
+        "                           it exists for isolating O_DIRECT's own effect\n"
+        "                           from everything else during benchmarking.\n"
         "  -h, --help               show this help and exit\n"
         "  -v, --version            show version and exit\n",
         argv0, easyio::io_uring_available() ? " (default: io_uring)" : " (only libc: built --without-liburing)",
@@ -70,6 +74,16 @@ easyio::Backend parse_queue_type(const std::string& s) {
     throw std::invalid_argument("easybd-server: --queue-type must be io_uring or libc");
 }
 
+bool parse_direct(const std::string& s) {
+    if (s == "1") {
+        return true;
+    }
+    if (s == "0") {
+        return false;
+    }
+    throw std::invalid_argument("easybd-server: --direct must be 0 or 1");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -88,6 +102,7 @@ int main(int argc, char** argv) {
         {"queue-depth", required_argument, nullptr, 'Q'},
         {"threads", required_argument, nullptr, 'j'},
         {"feature-multishot", no_argument, nullptr, 'M'},
+        {"direct", required_argument, nullptr, 'D'},
         {"help", no_argument, nullptr, 'h'},
         {"version", no_argument, nullptr, 'v'},
         {nullptr, 0, nullptr, 0},
@@ -121,6 +136,9 @@ int main(int argc, char** argv) {
                 break;
             case 'M':
                 config.multishot_recv = true;
+                break;
+            case 'D':
+                config.direct_io = parse_direct(optarg);
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -156,13 +174,22 @@ int main(int argc, char** argv) {
                 "--queue-type libc\n");
         }
 
+        if (!config.direct_io) {
+            std::fprintf(
+                stderr,
+                "easybd-server: warning: --direct 0 -- backing file is NOT opened "
+                "O_DIRECT; only meant for isolating O_DIRECT's own effect during "
+                "benchmarking, not for real use\n");
+        }
+
         std::fprintf(
             stderr,
             "easybd-server: listening on %s:%u, file=%s, backend=%s, threads=%u, depth=%u, "
-            "recv=%s\n",
+            "recv=%s, direct=%d\n",
             config.bind_host.c_str(), config.bind_port, config.file_path.c_str(),
             std::string(easyio::backend_name(config.backend)).c_str(), config.threads,
-            config.queue_depth, config.multishot_recv ? "multishot" : "ordinary");
+            config.queue_depth, config.multishot_recv ? "multishot" : "ordinary",
+            config.direct_io ? 1 : 0);
 
         easybd::run_server(config);
     } catch (const std::exception& e) {
