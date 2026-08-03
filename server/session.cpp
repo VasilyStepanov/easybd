@@ -15,21 +15,23 @@ namespace easybd {
 
 namespace {
 
-// recv_stream() entries for this connection's requests, independent of
-// queue.depth(): that's the whole worker's underlying SQE/poll capacity
-// (shared across every connection it handles, meant for many small
-// concurrent ops), not a signal for "how many large messages might be in
-// flight on one connection" -- the protocol has no per-connection iodepth
-// to read this off of in the first place. Using queue.depth() directly
-// here was tried and measured worse (round_up_pow2(128) * 4MiB = 512MiB
-// per connection with the default --queue-depth, versus 32MiB here):
-// cycling reads/writes through a needlessly huge buffer region costs more
-// in cache/TLB locality than it ever saves in avoided resubmits. 8 is a
-// plain guess at "probably enough concurrent large messages per
-// connection in practice," not derived from anything -- bump it (or wire
-// up a dedicated CLI knob) if a real workload needs deeper pipelining of
-// near-EASYBD_MAX_PAYLOAD_SIZE requests than that.
-constexpr unsigned int kRecvStreamEntries = 8;
+// recv_stream() ring sizing: entry_size close to what a single TCP recv
+// actually delivers, not EASYBD_MAX_PAYLOAD_SIZE (one whole max-size
+// message) -- a provided-buffer-ring slot is consumed whole per
+// completion regardless of how many bytes it actually holds, so slots
+// sized for the rare worst case (one giant write request body) exhaust
+// after just a handful of ordinary-sized chunks, forcing far more
+// resubmits than slots sized for the common case would. Also independent
+// of queue.depth() (the whole worker's underlying SQE/poll capacity,
+// shared across every connection it handles) -- using queue.depth()
+// directly here was tried and measured worse (round_up_pow2(128) * 4MiB =
+// 512MiB per connection with the default --queue-depth, versus 32MiB
+// here): cycling through a needlessly huge buffer region costs more in
+// cache/TLB locality than it ever saves in avoided resubmits. Matches
+// rawstor's librawstorio (see ost_session.cpp/ost/session.cpp), which
+// uses these same two constants.
+constexpr size_t kRecvEntrySize = 1u << 17; // 128 KiB
+constexpr unsigned int kRecvEntries = 64 * 4; // 256 -- 32 MiB ring total
 
 // Used for a request that fails validation before any actual I/O is
 // attempted (currently just an oversized read) -- same response shape as
@@ -107,13 +109,9 @@ easyio::Task<void> handle_connection(
     bool multishot_recv) {
     easyio::set_nonblocking(client_fd);
     easyio::set_tcp_nodelay(client_fd);
-    // entry_size: see Client::reader_loop()'s recv_stream() call -- large
-    // (multi-MiB) write request bodies hit the same ring-refill cost here
-    // that large read responses hit on the client side. entries: see
-    // kRecvStreamEntries above for why this isn't queue.depth(). multishot:
-    // see --feature-multishot in server/main.cpp.
-    auto stream =
-        queue.recv_stream(client_fd, EASYBD_MAX_PAYLOAD_SIZE, kRecvStreamEntries, multishot_recv);
+    // See kRecvEntrySize/kRecvEntries above. multishot: see
+    // --feature-multishot in server/main.cpp.
+    auto stream = queue.recv_stream(client_fd, kRecvEntrySize, kRecvEntries, multishot_recv);
     easyio::FramedReader reader(*stream);
     easyio::Mutex send_mtx;
     easyio::WaitGroup wg;
