@@ -28,10 +28,11 @@ int easybd_io_uring_available(void) { return easyio::io_uring_available() ? 1 : 
 
 int easybd_client_create(
     const char* host, uint16_t port, EasyBDBackend backend, unsigned int queue_depth,
-    int feature_multishot, EasyBDClient** out) {
+    int feature_multishot, int sync_writes, EasyBDClient** out) {
     try {
         auto* client = new easybd::Client(
-            host, port, to_easyio_backend(backend), queue_depth, feature_multishot != 0);
+            host, port, to_easyio_backend(backend), queue_depth, feature_multishot != 0,
+            sync_writes != 0);
         *out = reinterpret_cast<EasyBDClient*>(client);
         return 0;
     } catch (const std::system_error& e) {

@@ -25,9 +25,12 @@ public:
     // multishot_recv: see --feature-multishot on the fio engine / whatever
     // else drives this client; only meaningful with backend ==
     // easyio::Backend::IoUring (see Queue::recv_stream()'s doc comment).
+    // sync_writes: whether pwrite() requests durability (EASYBD_OP_WRITE_
+    // SYNC) or not (EASYBD_OP_WRITE) -- meant to mirror fio's own --sync
+    // option (see protocol.h's doc comment on the two write ops).
     Client(
         const std::string& host, uint16_t port, easyio::Backend backend, unsigned int queue_depth,
-        bool multishot_recv);
+        bool multishot_recv, bool sync_writes);
     ~Client();
 
     Client(const Client&) = delete;
@@ -57,6 +60,7 @@ private:
 
     std::unique_ptr<easyio::Queue> _queue;
     bool _multishot_recv;
+    bool _sync_writes;
     int _fd = -1;
     uint64_t _next_cid = 1;
     std::unordered_map<uint64_t, Pending> _pending;

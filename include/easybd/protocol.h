@@ -14,7 +14,20 @@
  * Request:
  *   struct EasyBDRequestHeader (fixed size)
  *   + `size` bytes of payload immediately following, but ONLY for
- *     EASYBD_OP_WRITE. EASYBD_OP_READ carries no request payload.
+ *     EASYBD_OP_WRITE/EASYBD_OP_WRITE_SYNC. EASYBD_OP_READ carries no
+ *     request payload.
+ *
+ * EASYBD_OP_WRITE vs EASYBD_OP_WRITE_SYNC: identical payload, differ only
+ * in the durability guarantee the server gives before responding.
+ * EASYBD_OP_WRITE is a plain pwrite() -- with the backing file opened
+ * O_DIRECT (the server always does), that bypasses the page cache but
+ * says nothing about a volatile write cache the underlying device may
+ * still hold the data in, so a "success" response doesn't mean the write
+ * survives a power loss. EASYBD_OP_WRITE_SYNC additionally forces that
+ * flush (RWF_DSYNC/O_DSYNC-equivalent) before responding. Which one a
+ * client sends is meant to mirror fio's own --sync option (see the fio
+ * engine, which reads td->o.sync_io) rather than being a separate ad hoc
+ * easybd setting.
  *
  * Response:
  *   struct EasyBDResponseHeader (fixed size), echoing the request's cid
@@ -53,6 +66,7 @@ extern "C" {
 enum {
     EASYBD_OP_READ = 0,
     EASYBD_OP_WRITE = 1,
+    EASYBD_OP_WRITE_SYNC = 2,
 };
 
 /* See the payload-size note above. */

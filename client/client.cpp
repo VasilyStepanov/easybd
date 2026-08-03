@@ -38,8 +38,9 @@ constexpr unsigned int kRecvEntries = 64 * 4; // 256 -- 32 MiB ring total
 
 Client::Client(
     const std::string& host, uint16_t port, easyio::Backend backend, unsigned int queue_depth,
-    bool multishot_recv)
-    : _queue(easyio::Queue::create(backend, queue_depth)), _multishot_recv(multishot_recv) {
+    bool multishot_recv, bool sync_writes)
+    : _queue(easyio::Queue::create(backend, queue_depth)), _multishot_recv(multishot_recv),
+      _sync_writes(sync_writes) {
     _fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (_fd < 0) {
         throw_errno(errno, "socket");
@@ -163,7 +164,7 @@ easyio::Task<void> Client::send_request(
     EasyBDRequestHeader req{cid, offset, size, op};
     auto guard = co_await easyio::lock_guard(_send_mtx);
     try {
-        if (op == EASYBD_OP_WRITE) {
+        if (op == EASYBD_OP_WRITE || op == EASYBD_OP_WRITE_SYNC) {
             co_await easyio::send_all(*_queue, _fd, &req, sizeof(req), payload, size);
         } else {
             co_await easyio::send_all(*_queue, _fd, &req, sizeof(req));
@@ -212,7 +213,8 @@ int Client::pwrite(
     }
     uint64_t cid = _next_cid++;
     _pending[cid] = Pending{false, nullptr, cb, user_data};
-    easyio::spawn(send_request(cid, offset, size, EASYBD_OP_WRITE, buf));
+    uint8_t op = _sync_writes ? EASYBD_OP_WRITE_SYNC : EASYBD_OP_WRITE;
+    easyio::spawn(send_request(cid, offset, size, op, buf));
     return 0;
 }
 
