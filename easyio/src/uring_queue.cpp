@@ -159,6 +159,24 @@ void Queue::cancel_fd(int fd) {
     io_uring_sqe_set_data(sqe, nullptr);
 }
 
+bool Queue::_use_fixed_file(int fd) noexcept {
+    if (_registered_fd == fd) {
+        return true;
+    }
+    if (_registered_fd != -1) {
+        // A different fd than the one already registered -- not the usage
+        // pattern this is built for (see the doc comment in the header).
+        // Fall back to a plain fd rather than re-registering.
+        return false;
+    }
+    int ret = io_uring_register_files(&_ring, &fd, 1);
+    if (ret < 0) {
+        return false; // registration failed; plain fd still works fine
+    }
+    _registered_fd = fd;
+    return true;
+}
+
 Task<int> Queue::open(const char* path, int flags, mode_t mode) {
     int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
         io_uring_prep_openat(sqe, AT_FDCWD, path, flags, mode);
@@ -179,8 +197,12 @@ Task<void> Queue::close(int fd) {
 }
 
 Task<size_t> Queue::pread(int fd, void* buf, size_t size, uint64_t offset) {
+    bool fixed = _use_fixed_file(fd);
     int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
-        io_uring_prep_read(sqe, fd, buf, size, offset);
+        io_uring_prep_read(sqe, fixed ? 0 : fd, buf, size, offset);
+        if (fixed) {
+            sqe->flags |= IOSQE_FIXED_FILE;
+        }
     });
     if (res < 0) {
         throw_errno(res, "pread");
@@ -189,8 +211,12 @@ Task<size_t> Queue::pread(int fd, void* buf, size_t size, uint64_t offset) {
 }
 
 Task<size_t> Queue::pwrite(int fd, const void* buf, size_t size, uint64_t offset) {
+    bool fixed = _use_fixed_file(fd);
     int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
-        io_uring_prep_write(sqe, fd, buf, size, offset);
+        io_uring_prep_write(sqe, fixed ? 0 : fd, buf, size, offset);
+        if (fixed) {
+            sqe->flags |= IOSQE_FIXED_FILE;
+        }
     });
     if (res < 0) {
         throw_errno(res, "pwrite");
@@ -199,9 +225,13 @@ Task<size_t> Queue::pwrite(int fd, const void* buf, size_t size, uint64_t offset
 }
 
 Task<size_t> Queue::pwrite_dsync(int fd, const void* buf, size_t size, uint64_t offset) {
+    bool fixed = _use_fixed_file(fd);
     int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
-        io_uring_prep_write(sqe, fd, buf, size, offset);
+        io_uring_prep_write(sqe, fixed ? 0 : fd, buf, size, offset);
         sqe->rw_flags |= RWF_DSYNC;
+        if (fixed) {
+            sqe->flags |= IOSQE_FIXED_FILE;
+        }
     });
     if (res < 0) {
         throw_errno(res, "pwrite_dsync");
