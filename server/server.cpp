@@ -78,8 +78,17 @@ int open_listen_socket(const std::string& host, uint16_t port) {
     return fd;
 }
 
-int open_backing_file(const std::string& path, uint64_t& out_size) {
-    int fd = ::open(path.c_str(), O_RDWR | O_DIRECT);
+// direct_io=false exists for benchmarking/diagnostic purposes -- e.g.
+// isolating whether a given result is actually about O_DIRECT bypassing
+// the page cache, or about something else entirely (RWF_DSYNC's io-wq
+// hand-off, a filesystem's own caching behavior, etc.) by comparing the
+// same backend/workload with and without it. Real deployments should
+// leave this at the default (true): without O_DIRECT, reads/writes go
+// through the page cache like an ordinary buffered file, which quietly
+// changes what's actually being measured/served.
+int open_backing_file(const std::string& path, uint64_t& out_size, bool direct_io) {
+    int flags = O_RDWR | (direct_io ? O_DIRECT : 0);
+    int fd = ::open(path.c_str(), flags);
     if (fd < 0) {
         throw_errno(errno, ("open backing file '" + path + "'").c_str());
     }
@@ -146,7 +155,7 @@ void worker_main(
 
 void run_server(const ServerConfig& config) {
     uint64_t file_size = 0;
-    int file_fd = open_backing_file(config.file_path, file_size);
+    int file_fd = open_backing_file(config.file_path, file_size, config.direct_io);
     int listen_fd = open_listen_socket(config.bind_host, config.bind_port);
 
     std::signal(SIGINT, handle_shutdown_signal);
