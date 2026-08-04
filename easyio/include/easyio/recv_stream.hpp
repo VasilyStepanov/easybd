@@ -42,18 +42,55 @@ public:
     // the stream is over and must not be awaited again.
     Awaiter next() noexcept { return Awaiter{this}; }
 
+    // Awaiter returned by next_batch(); usable as `co_await
+    // stream.next_batch(out, max_bytes)`.
+    struct BatchAwaiter {
+        RecvStream* stream;
+        std::span<Chunk> out;
+        size_t max_bytes;
+
+        [[nodiscard]] bool await_ready() noexcept { return stream->_ready(); }
+        void await_suspend(std::coroutine_handle<> h) noexcept { stream->_arm(h); }
+        [[nodiscard]] size_t await_resume() noexcept { return stream->_take_batch(out, max_bytes); }
+    };
+
+    // Batched variant of next(): waits for at least one chunk (identical
+    // suspend semantics to next()), then greedily drains any additional
+    // chunks that have *already* arrived -- no further waiting involved --
+    // up to max_bytes total and out.size() capacity, writing them into `out`
+    // and returning how many were written. Letting a backend that already
+    // has several completions queued up hand them all out in one go (rather
+    // than one chunk per next() round trip) is what lets a caller like
+    // FramedReader gather-copy several ring-provided chunks in one pass
+    // instead of one coroutine suspend/resume per chunk.
+    //
+    // Every chunk returned this way -- like next()'s -- stays valid only
+    // until the following next()/next_batch() call: that call's _ready()
+    // reclaims every buffer handed out (via either method) since the one
+    // before it, exactly like next()'s existing single-chunk contract, just
+    // generalized to however many are simultaneously outstanding.
+    BatchAwaiter next_batch(std::span<Chunk> out, size_t max_bytes) noexcept {
+        return BatchAwaiter{this, out, max_bytes};
+    }
+
 protected:
     RecvStream() = default;
 
-    // Backend hooks driving the Awaiter protocol above. _ready() runs at the
-    // start of every next() call regardless of whether it ends up
-    // suspending, so it's also where a backend reclaims the buffer handed
-    // out by the *previous* call (see recv_stream.hpp's chunk-lifetime note)
-    // and acts on any bookkeeping that unblocked as a result (e.g.
-    // resubmitting a multishot op that paused for lack of buffers).
+    // Backend hooks driving the Awaiter protocols above. _ready() runs at
+    // the start of every next()/next_batch() call regardless of whether it
+    // ends up suspending, so it's also where a backend reclaims the
+    // buffer(s) handed out by the *previous* call (see the chunk-lifetime
+    // note above) and acts on any bookkeeping that unblocked as a result
+    // (e.g. resubmitting a multishot op that paused for lack of buffers).
     virtual bool _ready() noexcept = 0;
     virtual void _arm(std::coroutine_handle<> h) noexcept = 0;
     virtual Chunk _take() noexcept = 0;
+
+    // Writes up to out.size() chunks (stopping early once max_bytes total
+    // has been reached) into `out`, returning the count written. Must
+    // behave like _take() called repeatedly, except it never waits for more
+    // data than was already available when the call started.
+    virtual size_t _take_batch(std::span<Chunk> out, size_t max_bytes) noexcept = 0;
 };
 
 } // namespace easyio

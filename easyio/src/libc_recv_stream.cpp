@@ -56,7 +56,7 @@ private:
         if (!_pending.empty()) {
             Pending p = _pending.front();
             _pending.pop_front();
-            _checked_out_idx = static_cast<int>(p.idx);
+            ++_checked_out_count;
             const auto* base = reinterpret_cast<const std::byte*>(
                 static_cast<char*>(_buf_base) + p.idx * _entry_size);
             return Chunk{std::span<const std::byte>(base, p.len), 0};
@@ -67,9 +67,33 @@ private:
         return Chunk{{}, 0};
     }
 
+    // Drains whatever is already sitting in _pending (never waits for
+    // more), up to out.size() chunks and max_bytes total -- same shape as
+    // uring_recv_stream.cpp's _take_batch().
+    size_t _take_batch(std::span<Chunk> out, size_t max_bytes) noexcept override {
+        size_t count = 0;
+        size_t bytes = 0;
+        while (count < out.size() && bytes < max_bytes && !_pending.empty()) {
+            Pending p = _pending.front();
+            _pending.pop_front();
+            ++_checked_out_count;
+            const auto* base = reinterpret_cast<const std::byte*>(
+                static_cast<char*>(_buf_base) + p.idx * _entry_size);
+            out[count++] = Chunk{std::span<const std::byte>(base, p.len), 0};
+            bytes += p.len;
+        }
+        if (count == 0) {
+            if (_error != 0) {
+                out[count++] = Chunk{{}, -_error};
+            } else {
+                out[count++] = Chunk{{}, 0};
+            }
+        }
+        return count;
+    }
+
     bool on_ready() noexcept override {
-        while (_error == 0 && !_eof &&
-               _pending.size() + (_checked_out_idx >= 0 ? 1u : 0u) < _entries) {
+        while (_error == 0 && !_eof && _pending.size() + _checked_out_count < _entries) {
             unsigned int idx = _write_idx;
             ssize_t r = ::recv(
                 _fd, static_cast<char*>(_buf_base) + idx * _entry_size, _entry_size, 0);
@@ -104,11 +128,13 @@ private:
     }
 
     void _return_checked_out() {
-        // Nothing to do: the slot becomes free for reuse simply because
-        // _write_idx already moved past it and won't reuse it until the
-        // ring wraps back around after `_entries` further receives, by
-        // which point _take() will have long since been called again.
-        _checked_out_idx = -1;
+        // Nothing to do beyond resetting the count: a slot becomes free for
+        // reuse simply because _write_idx already moved past it and won't
+        // reuse it until the ring wraps back around after `_entries`
+        // further receives, by which point the caller will have long since
+        // released it here. on_ready()'s room check is what actually keeps
+        // _write_idx from lapping a slot still counted here.
+        _checked_out_count = 0;
     }
 
     Queue& _queue;
@@ -124,7 +150,7 @@ private:
         unsigned int len;
     };
     std::deque<Pending> _pending;
-    int _checked_out_idx = -1;
+    unsigned int _checked_out_count = 0;
 
     bool _eof = false;
     int _error = 0;
