@@ -20,6 +20,13 @@ unsigned short next_buffer_group_id() noexcept {
     return counter.fetch_add(1, std::memory_order_relaxed);
 }
 
+// MAP_HUGE_2MB isn't visible without _GNU_SOURCE, and whether that's already
+// defined by the time <sys/mman.h> is first pulled in transitively isn't
+// reliable across TUs -- spell out the shift explicitly instead (2MiB huge
+// pages: log2(2MiB) = 21, per mmap(2)'s MAP_HUGE_SHIFT convention).
+constexpr int kMapHuge2MB = 21 << 26;
+constexpr size_t kHugePageSize = 1u << 21; // 2 MiB
+
 class RecvStreamImpl;
 
 // Owns the provided buffer ring and is the actual io_uring completion
@@ -53,8 +60,24 @@ public:
         // which turned out to land inside glibc's per-thread malloc arena
         // rather than its own mapping).
         _mmap_len = sizeof(io_uring_buf) * _entries + _entry_size * _entries;
+        // Try a static hugetlbfs page first -- entries is small enough now
+        // (see kRecvEntries's doc comment in session.cpp) that one 2MiB
+        // page comfortably covers the whole ring for the common case,
+        // trimming a further, smaller slice of dTLB misses on top of the
+        // ring-size fix. Best-effort: the reserved-hugepage pool is a
+        // small, shared, sysadmin-provisioned resource that a busy server
+        // can plausibly exhaust, so this must never be the only path --
+        // fall back to an ordinary mapping on any failure.
+        size_t huge_len = (_mmap_len + kHugePageSize - 1) & ~(kHugePageSize - 1);
         void* mapping = mmap(
-            nullptr, _mmap_len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+            nullptr, huge_len, PROT_READ | PROT_WRITE,
+            MAP_ANONYMOUS | MAP_PRIVATE | MAP_HUGETLB | kMapHuge2MB, -1, 0);
+        if (mapping != MAP_FAILED) {
+            _mmap_len = huge_len;
+        } else {
+            mapping = mmap(
+                nullptr, _mmap_len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        }
         if (mapping == MAP_FAILED) {
             throw std::bad_alloc();
         }
