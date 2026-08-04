@@ -21,17 +21,32 @@ namespace {
 // completion regardless of how many bytes it actually holds, so slots
 // sized for the rare worst case (one giant write request body) exhaust
 // after just a handful of ordinary-sized chunks, forcing far more
-// resubmits than slots sized for the common case would. Also independent
-// of queue.depth() (the whole worker's underlying SQE/poll capacity,
-// shared across every connection it handles) -- using queue.depth()
-// directly here was tried and measured worse (round_up_pow2(128) * 4MiB =
-// 512MiB per connection with the default --queue-depth, versus 32MiB
-// here): cycling through a needlessly huge buffer region costs more in
-// cache/TLB locality than it ever saves in avoided resubmits. Matches
-// rawstor's librawstorio (see ost_session.cpp/ost/session.cpp), which
-// uses these same two constants.
+// resubmits than slots sized for the common case would.
+//
+// entries is deliberately tiny (a handful of slots, not hundreds): what
+// actually drives multishot's per-op CPU cost on large multi-chunk
+// transfers isn't slot size or ring capacity in isolation, it's how many
+// *distinct* buffer-ring slots end up cycling through cache before one
+// gets reused -- a big ring (this used to be 256 entries / 32 MiB, sized
+// to comfortably outrun queue.depth()'s worst case) spreads a transfer's
+// chunks across many cold, rarely-revisited memory regions, while a
+// small ring forces the same handful of physical buffers to be reused
+// (and stay cache-hot) many times per transfer. Measured on seq4m_write
+// with --feature-multishot: shrinking entries from 256 down to 4 (and
+// nothing else) cut server-side CPU cost per op by ~25%, closing what
+// had been a large, consistent gap against the ordinary (non-multishot)
+// recv path -- confirmed via repeated same-session A/B trials, not a
+// one-off. The added resubmit frequency this implies (a 4MiB request
+// needs 32 chunks at this entry_size, so this ring recycles many times
+// over per single request) turned out to cost far less than the cache
+// locality it buys back; entries down at the theoretical minimum (2) was
+// measured statistically indistinguishable from 4, so 4 is kept for a
+// little pipelining headroom rather than chasing the last fraction of a
+// percent. Independent of queue.depth() (the whole worker's underlying
+// SQE/poll capacity, shared across every connection it handles) -- using
+// queue.depth() directly here was tried and measured worse.
 constexpr size_t kRecvEntrySize = 1u << 17; // 128 KiB
-constexpr unsigned int kRecvEntries = 64 * 4; // 256 -- 32 MiB ring total
+constexpr unsigned int kRecvEntries = 4; // 512 KiB ring total
 
 // Used for a request that fails validation before any actual I/O is
 // attempted (currently just an oversized read) -- same response shape as
