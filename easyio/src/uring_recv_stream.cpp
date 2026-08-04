@@ -7,6 +7,9 @@
 #include <new>
 #include <system_error>
 #include <utility>
+#include <vector>
+
+#include <sys/mman.h>
 
 namespace easyio::uring {
 
@@ -40,16 +43,34 @@ public:
     RecvSink(Queue& queue, int fd, size_t entry_size, unsigned int entries)
         : _queue(queue), _fd(fd), _entry_size(entry_size), _entries(entries),
           _bgid(next_buffer_group_id()) {
-        int ret = 0;
-        _br = io_uring_setup_buf_ring(&_queue._ring_handle(), _entries, _bgid, 0, &ret);
-        if (!_br) {
-            throw std::system_error(-ret, std::generic_category(), "io_uring_setup_buf_ring");
-        }
-
-        _buf_len = _entry_size * _entries;
-        if (posix_memalign(&_buf_base, 4096, _buf_len) != 0) {
-            io_uring_free_buf_ring(&_queue._ring_handle(), _br, _entries, _bgid);
+        // Ring metadata (the io_uring_buf descriptor array the kernel reads
+        // to pick a buffer) and the actual data buffers live in one single
+        // mmap, metadata first and data immediately after -- matches
+        // rawstor's librawio (see rawio/uring_buffer.cpp's BufferRing
+        // constructor) rather than io_uring_setup_buf_ring()'s default of
+        // allocating the ring separately from wherever the caller happens
+        // to get its data buffer from (posix_memalign here previously,
+        // which turned out to land inside glibc's per-thread malloc arena
+        // rather than its own mapping).
+        _mmap_len = sizeof(io_uring_buf) * _entries + _entry_size * _entries;
+        void* mapping = mmap(
+            nullptr, _mmap_len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (mapping == MAP_FAILED) {
             throw std::bad_alloc();
+        }
+        _br = static_cast<io_uring_buf_ring*>(mapping);
+        _buf_base = static_cast<char*>(mapping) + sizeof(io_uring_buf) * _entries;
+
+        io_uring_buf_ring_init(_br);
+
+        io_uring_buf_reg reg{};
+        reg.ring_addr = reinterpret_cast<__u64>(_br);
+        reg.ring_entries = _entries;
+        reg.bgid = _bgid;
+        int ret = io_uring_register_buf_ring(&_queue._ring_handle(), &reg, 0);
+        if (ret < 0) {
+            munmap(mapping, _mmap_len);
+            throw std::system_error(-ret, std::generic_category(), "io_uring_register_buf_ring");
         }
 
         int mask = io_uring_buf_ring_mask(_entries);
@@ -65,8 +86,8 @@ public:
     }
 
     ~RecvSink() {
-        free(_buf_base);
-        io_uring_free_buf_ring(&_queue._ring_handle(), _br, _entries, _bgid);
+        io_uring_unregister_buf_ring(&_queue._ring_handle(), _bgid);
+        munmap(_br, _mmap_len);
     }
 
     void submit_recv() {
@@ -109,7 +130,7 @@ private:
     unsigned short _bgid;
 
     void* _buf_base = nullptr;
-    size_t _buf_len = 0;
+    size_t _mmap_len = 0;
     io_uring_buf_ring* _br = nullptr;
     bool _live = false;
 };
@@ -198,10 +219,10 @@ public:
     }
 
 private:
-    // Runs at the start of every next() call (see recv_stream.hpp): reclaims
-    // the buffer handed out by the previous _take(), which by contract the
-    // caller is done with as of this new call, then reports whether a chunk
-    // is available without suspending.
+    // Runs at the start of every next()/next_batch() call (see
+    // recv_stream.hpp): reclaims every buffer handed out by the previous
+    // call, which by contract the caller is done with as of this new call,
+    // then reports whether a chunk is available without suspending.
     bool _ready() noexcept override {
         _return_checked_out();
         return !_pending.empty() || _eof || _error != 0;
@@ -213,7 +234,7 @@ private:
         if (!_pending.empty()) {
             Pending p = _pending.front();
             _pending.pop_front();
-            _checked_out_idx = static_cast<int>(p.buf_idx);
+            _checked_out.push_back(p.buf_idx);
             const auto* base = reinterpret_cast<const std::byte*>(
                 static_cast<char*>(_sink->buf_base()) + p.buf_idx * _sink->entry_size());
             return Chunk{std::span<const std::byte>(base, p.len), 0};
@@ -224,22 +245,50 @@ private:
         return Chunk{{}, 0};
     }
 
+    // Drains whatever is already sitting in _pending (never waits for
+    // more), up to out.size() chunks and max_bytes total. Mirrors _take()'s
+    // per-chunk logic, just repeated and collected instead of returning
+    // after one.
+    size_t _take_batch(std::span<Chunk> out, size_t max_bytes) noexcept override {
+        size_t count = 0;
+        size_t bytes = 0;
+        while (count < out.size() && bytes < max_bytes && !_pending.empty()) {
+            Pending p = _pending.front();
+            _pending.pop_front();
+            _checked_out.push_back(p.buf_idx);
+            const auto* base = reinterpret_cast<const std::byte*>(
+                static_cast<char*>(_sink->buf_base()) + p.buf_idx * _sink->entry_size());
+            out[count++] = Chunk{std::span<const std::byte>(base, p.len), 0};
+            bytes += p.len;
+        }
+        if (count == 0) {
+            if (_error != 0) {
+                out[count++] = Chunk{{}, -_error};
+            } else {
+                out[count++] = Chunk{{}, 0};
+            }
+        }
+        return count;
+    }
+
     void _return_checked_out() {
-        if (_checked_out_idx >= 0) {
-            io_uring_buf_ring_add(
-                _sink->buf_ring(),
-                static_cast<char*>(_sink->buf_base()) + _checked_out_idx * _sink->entry_size(),
-                static_cast<unsigned int>(_sink->entry_size()),
-                static_cast<unsigned short>(_checked_out_idx),
-                io_uring_buf_ring_mask(_sink->entries()), 0);
-            io_uring_buf_ring_advance(_sink->buf_ring(), 1);
-            _checked_out_idx = -1;
+        if (!_checked_out.empty()) {
+            int mask = io_uring_buf_ring_mask(_sink->entries());
+            for (size_t i = 0; i < _checked_out.size(); ++i) {
+                unsigned int idx = _checked_out[i];
+                io_uring_buf_ring_add(
+                    _sink->buf_ring(), static_cast<char*>(_sink->buf_base()) + idx * _sink->entry_size(),
+                    static_cast<unsigned int>(_sink->entry_size()), static_cast<unsigned short>(idx),
+                    mask, static_cast<int>(i));
+            }
+            io_uring_buf_ring_advance(_sink->buf_ring(), static_cast<int>(_checked_out.size()));
+            _checked_out.clear();
         }
         _maybe_resubmit();
     }
 
     void _maybe_resubmit() {
-        if (_needs_resubmit && _checked_out_idx < 0) {
+        if (_needs_resubmit && _checked_out.empty()) {
             _needs_resubmit = false;
             _sink->submit_recv();
         }
@@ -252,7 +301,7 @@ private:
         unsigned int len;
     };
     std::deque<Pending> _pending;
-    int _checked_out_idx = -1;
+    std::vector<unsigned int> _checked_out;
 
     bool _eof = false;
     int _error = 0;
@@ -386,6 +435,19 @@ private:
             return Chunk{{}, -_error};
         }
         return Chunk{{}, 0};
+    }
+
+    // There is only ever one buffer/op in flight for singleshot, so there's
+    // never more than one already-arrived chunk to drain -- this always
+    // returns exactly the same single chunk _take() would have, just via
+    // the batch-shaped signature FramedReader uses uniformly across
+    // backends.
+    size_t _take_batch(std::span<Chunk> out, size_t /*max_bytes*/) noexcept override {
+        if (out.empty()) {
+            return 0;
+        }
+        out[0] = _take();
+        return 1;
     }
 
     void _reclaim() {
