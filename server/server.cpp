@@ -107,9 +107,12 @@ int open_backing_file(const std::string& path, uint64_t& out_size, bool direct_i
 // a server-level error) and closes the fd once every in-flight request on
 // it has finished.
 easyio::Task<void> accept_one(
-    easyio::Queue& queue, int client_fd, int file_fd, uint64_t file_size, bool multishot_recv) {
+    easyio::Queue& queue, int client_fd, int file_fd, uint64_t file_size, bool multishot_recv,
+    unsigned int recv_ring_entries, size_t recv_ring_entry_size) {
     try {
-        co_await handle_connection(queue, client_fd, file_fd, file_size, multishot_recv);
+        co_await handle_connection(
+            queue, client_fd, file_fd, file_size, multishot_recv, recv_ring_entries,
+            recv_ring_entry_size);
     } catch (...) { // NOLINT(bugprone-empty-catch): deliberate, see comment above
     }
     try {
@@ -123,7 +126,8 @@ easyio::Task<void> accept_one(
 // of this loop against the *same* listen_fd; the kernel distributes
 // incoming connections across whichever threads have a pending accept.
 easyio::Task<void> accept_loop(
-    easyio::Queue& queue, int listen_fd, int file_fd, uint64_t file_size, bool multishot_recv) {
+    easyio::Queue& queue, int listen_fd, int file_fd, uint64_t file_size, bool multishot_recv,
+    unsigned int recv_ring_entries, size_t recv_ring_entry_size) {
     for (;;) {
         int client_fd = 0;
         try {
@@ -159,15 +163,19 @@ easyio::Task<void> accept_loop(
             // safe to just retry.
             co_return;
         }
-        easyio::spawn(accept_one(queue, client_fd, file_fd, file_size, multishot_recv));
+        easyio::spawn(accept_one(
+            queue, client_fd, file_fd, file_size, multishot_recv, recv_ring_entries,
+            recv_ring_entry_size));
     }
 }
 
 void worker_main(
     easyio::Backend backend, unsigned int depth, int listen_fd, int file_fd, uint64_t file_size,
-    bool multishot_recv) {
+    bool multishot_recv, unsigned int recv_ring_entries, size_t recv_ring_entry_size) {
     auto queue = easyio::Queue::create(backend, depth);
-    easyio::spawn(accept_loop(*queue, listen_fd, file_fd, file_size, multishot_recv));
+    easyio::spawn(accept_loop(
+        *queue, listen_fd, file_fd, file_size, multishot_recv, recv_ring_entries,
+        recv_ring_entry_size));
     // The pending accept (and any in-flight request) stays registered
     // across these calls -- a timed-out step() just means "nothing happened
     // in the last kShutdownPollTimeoutMs," not that anything gets
@@ -192,7 +200,7 @@ void run_server(const ServerConfig& config) {
     for (unsigned int i = 0; i < config.threads; ++i) {
         workers.emplace_back(
             worker_main, config.backend, config.queue_depth, listen_fd, file_fd, file_size,
-            config.multishot_recv);
+            config.multishot_recv, config.recv_ring_entries, config.recv_ring_entry_size);
     }
 
     while (!g_shutdown_requested.load(std::memory_order_relaxed)) {
@@ -203,6 +211,14 @@ void run_server(const ServerConfig& config) {
     for (auto& t : workers) {
         t.join();
     }
+
+    ZeroCopyStats zc = zero_copy_stats();
+    std::fprintf(
+        stderr,
+        "easybd-server: zero-copy write stats: hits=%llu pinned-unaligned-fallback=%llu "
+        "unavailable=%llu\n",
+        static_cast<unsigned long long>(zc.hits), static_cast<unsigned long long>(zc.pinned_unaligned),
+        static_cast<unsigned long long>(zc.unavailable));
 
     ::close(listen_fd);
     ::close(file_fd);
