@@ -128,9 +128,35 @@ easyio::Task<void> accept_loop(
         int client_fd = 0;
         try {
             client_fd = co_await queue.accept(listen_fd);
+        } catch (const std::system_error& e) {
+            // accept(2)'s BUGS section: a peer that resets a connection
+            // after the kernel completes the handshake but before this
+            // thread gets around to calling accept4() surfaces as an
+            // error here (ECONNABORTED, and in practice sometimes
+            // ECONNRESET/EPROTO/ENETDOWN/... depending on the network
+            // stack) -- portable code is expected to just try again, not
+            // treat it as the listen socket itself dying. Getting this
+            // wrong doesn't just drop the one connection: since nothing
+            // else ever re-arms accept() on this thread's listen_fd, it
+            // silently and permanently stops this worker from accepting
+            // *any* future connection, while the kernel keeps completing
+            // TCP handshakes into the backlog regardless -- callers see
+            // their connect() succeed and then hang forever with no
+            // application on the other end ever reading anything (found
+            // via a stuck benchmark connection sitting in CLOSE-WAIT with
+            // unread bytes in Recv-Q, and strace confirming this thread's
+            // poll() set had gone completely empty -- not even listen_fd
+            // was still registered). EBADF/EINVAL mean listen_fd itself
+            // is gone (fd closed under us) -- that's the real shutdown
+            // signal this loop should stop on.
+            if (e.code().value() == EBADF || e.code().value() == EINVAL) {
+                co_return;
+            }
+            continue;
         } catch (...) {
-            // Listen socket closed (shutdown) or an unrecoverable accept
-            // error -- either way, this worker stops accepting.
+            // Some other, non-accept()-shaped failure -- not a case the
+            // BUGS-section guidance above covers, so don't assume it's
+            // safe to just retry.
             co_return;
         }
         easyio::spawn(accept_one(queue, client_fd, file_fd, file_size, multishot_recv));
