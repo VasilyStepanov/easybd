@@ -376,22 +376,6 @@ Task<size_t> Queue::pwrite_dsync(int fd, const void* buf, size_t size, uint64_t 
     co_return static_cast<size_t>(r);
 }
 
-Task<size_t> Queue::pwritev(int fd, const iovec* iov, int iovcnt, uint64_t offset) {
-    ssize_t r = ::pwritev(fd, iov, iovcnt, static_cast<off_t>(offset));
-    if (r < 0) {
-        throw_errno(errno, "pwritev");
-    }
-    co_return static_cast<size_t>(r);
-}
-
-Task<size_t> Queue::pwritev_dsync(int fd, const iovec* iov, int iovcnt, uint64_t offset) {
-    ssize_t r = ::pwritev2(fd, iov, iovcnt, static_cast<off_t>(offset), RWF_DSYNC);
-    if (r < 0) {
-        throw_errno(errno, "pwritev_dsync");
-    }
-    co_return static_cast<size_t>(r);
-}
-
 Task<int> Queue::accept(int fd) {
     int res = co_await AcceptAwaiter(*this, fd);
     if (res < 0) {

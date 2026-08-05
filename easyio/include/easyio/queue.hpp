@@ -87,18 +87,6 @@ public:
     // have, which RWF_DSYNC's implicit flush/FUA is what actually forces.
     virtual Task<size_t> pwrite_dsync(int fd, const void* buf, size_t size, uint64_t offset) = 0;
 
-    // Vectored counterparts of pwrite()/pwrite_dsync(): writes iov[0..iovcnt)
-    // as a single kernel operation (::pwritev / IORING_OP_WRITEV), for a
-    // payload that's scattered across several source buffers instead of one
-    // contiguous one -- e.g. writing straight out of several io_uring
-    // provided-buffer-ring chunks without first gathering them into one
-    // buffer. With O_DIRECT, every iov's base must be device-alignment-
-    // aligned, and every iov but the last must also have an aligned length
-    // (same constraint a single pwrite()'s buf/size already have to satisfy,
-    // just per-segment now).
-    virtual Task<size_t> pwritev(int fd, const iovec* iov, int iovcnt, uint64_t offset) = 0;
-    virtual Task<size_t> pwritev_dsync(int fd, const iovec* iov, int iovcnt, uint64_t offset) = 0;
-
     virtual Task<int> accept(int fd) = 0;
     virtual Task<void> connect(int fd, const sockaddr* addr, socklen_t addrlen) = 0;
 

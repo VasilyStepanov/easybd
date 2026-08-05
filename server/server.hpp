@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -19,18 +18,6 @@ struct ServerConfig {
     // io_uring backend; the libc backend ignores it (it has no multishot
     // recv to begin with).
     bool multishot_recv = false;
-    // recv_stream() ring sizing -- see kRecvEntrySize/kRecvEntries's doc
-    // comment (formerly in session.cpp, now just these defaults) for why
-    // the ring is deliberately tiny by default. Raising --recv-ring-entries
-    // matters specifically when testing the zero-copy write path (see
-    // handle_write_zerocopy in session.cpp): a payload pinned until its
-    // disk write completes ties up its ring slot(s) far longer than the
-    // default sizing assumes, so sustaining pipelining under zero-copy at a
-    // given iodepth needs a ring sized to cover that iodepth's worst-case
-    // in-flight payload bytes, not just the ordinary-copy path's cache-
-    // locality sweet spot.
-    unsigned int recv_ring_entries = 4;
-    size_t recv_ring_entry_size = 1u << 17; // 128 KiB
     // See --direct in main.cpp. Whether the backing file is opened
     // O_DIRECT (default) or not -- see open_backing_file()'s doc comment
     // for why this is sometimes useful to turn off.

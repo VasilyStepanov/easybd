@@ -141,21 +141,6 @@ public:
     [[nodiscard]] unsigned int entries() const noexcept { return _entries; }
     io_uring_buf_ring* buf_ring() noexcept { return _br; }
 
-    // Tracks how many slots are currently held via RecvStream::pin_last()
-    // rather than sitting in RecvStreamImpl::_checked_out -- i.e. slots
-    // that won't come back to this ring at the next _ready(), possibly for
-    // a long time (as long as whatever I/O is reading/writing straight out
-    // of them takes). Used only to keep this sink's own teardown (mmap
-    // unregister/unmap) from racing a still-outstanding pin: see on_cqe()'s
-    // orphan-delete check below. Not reachable via any path in this server
-    // today (handle_connection's WaitGroup already guarantees every pin is
-    // released before the owning RecvStreamImpl -- and therefore this
-    // sink's normal teardown -- runs), kept as a backstop against that
-    // invariant ever being broken elsewhere.
-    void add_pinned(unsigned int n) noexcept { _pinned_count += n; }
-    void remove_pinned(unsigned int n) noexcept { _pinned_count -= n; }
-    [[nodiscard]] unsigned int pinned() const noexcept { return _pinned_count; }
-
     RecvStreamImpl* owner = nullptr;
 
 private:
@@ -171,7 +156,6 @@ private:
     size_t _mmap_len = 0;
     io_uring_buf_ring* _br = nullptr;
     bool _live = false;
-    unsigned int _pinned_count = 0;
 };
 
 // Multishot recv on one fd: the kernel fills buffers from RecvSink's
@@ -188,21 +172,11 @@ public:
 
     ~RecvStreamImpl() override {
         _sink->detach();
-        if (_sink->live() || _sink->pinned() > 0) {
-            // Either still live (existing case: wait for the cancellation's
-            // terminal completion before freeing anything) or -- shouldn't
-            // happen given handle_connection's WaitGroup, see add_pinned()'s
-            // doc comment -- still has pins outstanding: either way, this
-            // sink must stay alive and self-contained rather than being
-            // deleted out from under memory something else may still be
-            // reading/writing.
-            if (_sink->live()) {
-                _sink->request_cancel();
-            }
+        if (_sink->live()) {
+            _sink->request_cancel();
             // Ownership of the sink (and its eventual cleanup) is now
             // fully self-contained: it deletes itself once it observes the
-            // cancellation's terminal completion (if any was needed) and
-            // every pin has been released.
+            // cancellation's terminal completion.
         } else {
             delete _sink;
         }
@@ -322,59 +296,17 @@ private:
 
     void _return_checked_out() {
         if (!_checked_out.empty()) {
-            _add_to_ring(_checked_out);
+            int mask = io_uring_buf_ring_mask(_sink->entries());
+            for (size_t i = 0; i < _checked_out.size(); ++i) {
+                unsigned int idx = _checked_out[i];
+                io_uring_buf_ring_add(
+                    _sink->buf_ring(), static_cast<char*>(_sink->buf_base()) + idx * _sink->entry_size(),
+                    static_cast<unsigned int>(_sink->entry_size()), static_cast<unsigned short>(idx),
+                    mask, static_cast<int>(i));
+            }
+            io_uring_buf_ring_advance(_sink->buf_ring(), static_cast<int>(_checked_out.size()));
             _checked_out.clear();
         }
-        _maybe_resubmit();
-    }
-
-    // Adds every buf_idx in `indices` back to the provided buffer ring in
-    // one batch. Shared by _return_checked_out() (the normal per-next()
-    // reclaim) and _release_pin() (an explicit, caller-timed release of
-    // slots pin_last() had pulled out of that automatic reclaim).
-    void _add_to_ring(const std::vector<unsigned int>& indices) noexcept {
-        int mask = io_uring_buf_ring_mask(_sink->entries());
-        for (size_t i = 0; i < indices.size(); ++i) {
-            unsigned int idx = indices[i];
-            io_uring_buf_ring_add(
-                _sink->buf_ring(), static_cast<char*>(_sink->buf_base()) + idx * _sink->entry_size(),
-                static_cast<unsigned int>(_sink->entry_size()), static_cast<unsigned short>(idx), mask,
-                static_cast<int>(i));
-        }
-        io_uring_buf_ring_advance(_sink->buf_ring(), static_cast<int>(indices.size()));
-    }
-
-    // Pins whatever _take()/_take_batch() most recently appended to
-    // _checked_out (i.e. exactly what the next _ready() would otherwise
-    // reclaim), removing it from that list -- _return_checked_out() simply
-    // never sees these indices again until _release_pin() hands them back
-    // itself. Deliberately does NOT touch _needs_resubmit/_maybe_resubmit():
-    // those exist to avoid a premature, likely-immediately-ENOBUFS resubmit
-    // while buffers are *about to* free up very soon (the next _ready()),
-    // which says nothing about slots pinned for a potentially much longer,
-    // caller-controlled duration -- gating resubmission on pinned slots too
-    // would stall this connection's whole recv stream for as long as any
-    // one write is in flight, even with plenty of *other* free slots.
-    void* _pin_last() override {
-        if (_checked_out.empty()) {
-            return nullptr;
-        }
-        // Not noexcept (see the base class's doc comment): this allocation
-        // can in principle throw std::bad_alloc, which is left to
-        // propagate normally rather than silently masquerading as "can't
-        // pin" -- _checked_out is untouched until this succeeds, so
-        // nothing is lost if it does throw.
-        auto* pinned = new std::vector<unsigned int>(std::move(_checked_out));
-        _checked_out.clear();
-        _sink->add_pinned(static_cast<unsigned int>(pinned->size()));
-        return pinned;
-    }
-
-    void _release_pin(void* token) noexcept override {
-        auto* pinned = static_cast<std::vector<unsigned int>*>(token);
-        _add_to_ring(*pinned);
-        _sink->remove_pinned(static_cast<unsigned int>(pinned->size()));
-        delete pinned;
         _maybe_resubmit();
     }
 
@@ -406,14 +338,9 @@ void RecvSink::on_cqe(int res, unsigned int flags) noexcept {
     }
     if (owner) {
         owner->handle_cqe(res, flags);
-    } else if (!_live && _pinned_count == 0) {
-        // Orphaned (owner already destroyed), the kernel confirms no more
-        // completions are coming for this op, and nothing still holds a
-        // pinned slot in this ring: safe to free now. (If _pinned_count
-        // were nonzero here -- not reachable today, see add_pinned()'s doc
-        // comment -- deliberately leaking rather than freeing memory a
-        // still-outstanding pin might be pointing at is the safe failure
-        // mode.)
+    } else if (!_live) {
+        // Orphaned (owner already destroyed) and the kernel confirms no
+        // more completions are coming for this op: safe to free now.
         delete this;
     }
 }

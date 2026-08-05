@@ -3,7 +3,6 @@
 #include <coroutine>
 #include <cstddef>
 #include <span>
-#include <utility>
 
 namespace easyio {
 
@@ -22,39 +21,6 @@ public:
     struct Chunk {
         std::span<const std::byte> data; // empty at EOF
         int error = 0;                   // 0 = ok (data may still be empty at EOF), else -errno
-    };
-
-    // Move-only handle for a set of chunks pinned past their normal
-    // lifetime (see pin_last()'s doc comment). Default-constructed (or
-    // moved-from) is "invalid" -- explicit operator bool() reports whether
-    // release() is required. Deliberately opaque: the token is whatever
-    // the owning backend's _pin_last() returned, meaningful only to that
-    // backend's _release_pin().
-    class PinHandle {
-    public:
-        PinHandle() noexcept = default;
-        PinHandle(PinHandle&& other) noexcept
-            : _stream(std::exchange(other._stream, nullptr)),
-              _token(std::exchange(other._token, nullptr)) {}
-        PinHandle& operator=(PinHandle&& other) noexcept {
-            if (this != &other) {
-                _stream = std::exchange(other._stream, nullptr);
-                _token = std::exchange(other._token, nullptr);
-            }
-            return *this;
-        }
-        PinHandle(const PinHandle&) = delete;
-        PinHandle& operator=(const PinHandle&) = delete;
-        ~PinHandle() = default; // see release()'s doc comment: caller must release explicitly
-
-        [[nodiscard]] explicit operator bool() const noexcept { return _stream != nullptr; }
-
-    private:
-        friend class RecvStream;
-        PinHandle(RecvStream* stream, void* token) noexcept : _stream(stream), _token(token) {}
-
-        RecvStream* _stream = nullptr;
-        void* _token = nullptr;
     };
 
     virtual ~RecvStream() = default;
@@ -107,45 +73,6 @@ public:
         return BatchAwaiter{this, out, max_bytes};
     }
 
-    // Pins every chunk handed out by the immediately preceding _take()/
-    // _take_batch() call -- i.e. exactly the set the *next* next()/
-    // next_batch() call's _ready() would otherwise reclaim -- so that set
-    // survives past that point instead. Meant for a caller that wants to
-    // keep reading (or issuing further I/O against) backend-owned memory
-    // beyond the usual one-call lifetime, e.g. writing straight out of an
-    // io_uring provided buffer instead of copying it first.
-    //
-    // Returns an invalid handle (operator bool() == false) if this
-    // backend/stream can't pin right now (the libc backend and io_uring's
-    // singleshot mode never can; io_uring multishot usually can, but may
-    // decline for backend-specific reasons) -- the caller must fall back
-    // to copying the chunk's bytes out itself in that case, exactly as if
-    // pinning didn't exist. Not noexcept: a backend's bookkeeping for a
-    // newly-pinned set may need to allocate (e.g. to remember which ring
-    // slots it covers), and a genuine allocation failure here should
-    // surface as an ordinary exception rather than a silent decline that
-    // would otherwise look identical to "backend just can't pin."
-    [[nodiscard]] PinHandle pin_last() {
-        void* token = _pin_last();
-        return token ? PinHandle(this, token) : PinHandle();
-    }
-
-    // Returns every chunk referenced by handle to the backend, undoing
-    // pin_last(). Must be called exactly once per valid PinHandle, and may
-    // be called from anywhere (not necessarily before the stream's next
-    // next() call) -- typically once whatever I/O was reading directly out
-    // of that pinned memory has completed. A handle that's still valid
-    // when destroyed without this having run leaks its chunks (they never
-    // return to circulation) -- same "caller must follow the contract"
-    // expectation as WaitGroup's add()/done().
-    void release(PinHandle handle) noexcept {
-        if (handle._stream) {
-            handle._stream->_release_pin(handle._token);
-            handle._stream = nullptr;
-            handle._token = nullptr;
-        }
-    }
-
 protected:
     RecvStream() = default;
 
@@ -164,12 +91,6 @@ protected:
     // behave like _take() called repeatedly, except it never waits for more
     // data than was already available when the call started.
     virtual size_t _take_batch(std::span<Chunk> out, size_t max_bytes) noexcept = 0;
-
-    // Backend hooks for pin_last()/release() -- see their doc comments.
-    // Default (no pinning support): always decline. _pin_last() is
-    // deliberately not noexcept -- see pin_last()'s doc comment.
-    virtual void* _pin_last() { return nullptr; }
-    virtual void _release_pin(void* token) noexcept { (void)token; }
 };
 
 } // namespace easyio
