@@ -354,6 +354,49 @@ TEST_P(EasyioTest, MutexSerializesConcurrentSends) {
     ::close(listen_fd);
 }
 
+easyio::Task<void> pin_decline_server(easyio::Queue& queue, int listen_fd, bool* pin_was_valid) {
+    int fd = co_await queue.accept(listen_fd);
+    // multishot=false forces the "ordinary recv" path on every backend
+    // (see recv_stream()'s doc comment): the libc backend never supports
+    // pinning, and io_uring's own singleshot mode doesn't either -- only
+    // io_uring multishot does (see EasyioZeroCopyPin below).
+    auto stream = queue.recv_stream(fd, 4096, 4, /*multishot=*/false);
+    auto chunk = co_await stream->next();
+    if (chunk.error != 0) {
+        throw std::system_error(-chunk.error, std::generic_category(), "recv");
+    }
+    auto pin = stream->pin_last();
+    *pin_was_valid = static_cast<bool>(pin);
+    if (*pin_was_valid) {
+        stream->release(std::move(pin));
+    }
+    co_await queue.close(fd);
+}
+
+TEST_P(EasyioTest, PinLastDeclinedWithoutMultishot) {
+    auto queue = easyio::Queue::create(GetParam(), 32);
+
+    uint16_t port = 0;
+    int listen_fd = make_listen_socket(&port);
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    easyio::set_nonblocking(client_fd);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    bool pin_was_valid = true;
+    run_pair(
+        *queue, pin_decline_server(*queue, listen_fd, &pin_was_valid),
+        client_send_one(*queue, client_fd, addr, std::string("hi")));
+
+    EXPECT_FALSE(pin_was_valid);
+    ::close(listen_fd);
+}
+
 // --feature-multishot off is only a distinct code path on the io_uring
 // backend (see queue.hpp's recv_stream() doc comment) -- these two mirror
 // SocketSendRecvStream/FramedReaderExactBoundaries above but force the
@@ -416,6 +459,98 @@ TEST(EasyioSingleShotRecvStream, FramedReaderExactBoundaries) {
         framed_client(*queue, client_fd, addr, expected));
 
     EXPECT_EQ(received, expected);
+    ::close(listen_fd);
+}
+
+// Reads the first chunk, pins it (see RecvStream::pin_last()'s doc
+// comment), then keeps draining the rest of a large message through the
+// same small (4-entry) ring before finally releasing it. If pin_last()
+// didn't actually exclude that chunk's ring slot from being recycled, the
+// slot's buf_idx would inevitably get reused (and its content overwritten)
+// well before the whole message arrives -- entries=4 with a ~70000-byte
+// message needs on the order of 18 chunks, cycling through the ring
+// several times over.
+easyio::Task<void> pin_recycle_server(
+    easyio::Queue& queue, int listen_fd, std::string* out, std::string* pinned_snapshot,
+    std::string* pinned_reread, bool* pin_was_valid) {
+    int fd = co_await queue.accept(listen_fd);
+    auto stream = queue.recv_stream(fd, 4096, 4, /*multishot=*/true);
+
+    auto first = co_await stream->next();
+    if (first.error != 0) {
+        throw std::system_error(-first.error, std::generic_category(), "recv");
+    }
+    if (first.data.empty()) {
+        throw std::runtime_error("connection closed before any data");
+    }
+    *pinned_snapshot =
+        std::string(reinterpret_cast<const char*>(first.data.data()), first.data.size());
+    auto pin = stream->pin_last();
+    *pin_was_valid = static_cast<bool>(pin);
+
+    std::string data(*pinned_snapshot);
+    for (;;) {
+        auto chunk = co_await stream->next();
+        if (chunk.error != 0) {
+            throw std::system_error(-chunk.error, std::generic_category(), "recv");
+        }
+        if (chunk.data.empty()) {
+            break;
+        }
+        data.append(reinterpret_cast<const char*>(chunk.data.data()), chunk.data.size());
+    }
+
+    if (*pin_was_valid) {
+        // Read the pinned span back now, right before releasing it --
+        // still pointing at the exact same ring memory as when first
+        // captured above, so any mismatch here means something else was
+        // allowed to reuse that slot while it was supposedly pinned.
+        *pinned_reread =
+            std::string(reinterpret_cast<const char*>(first.data.data()), first.data.size());
+        stream->release(std::move(pin));
+    }
+
+    *out = std::move(data);
+    co_await queue.close(fd);
+}
+
+TEST(EasyioZeroCopyPin, PinnedChunkSurvivesRingRecycling) {
+    if (!easyio::io_uring_available()) {
+        GTEST_SKIP() << "built --without-liburing";
+    }
+    auto queue = easyio::Queue::create(easyio::Backend::IoUring, 32);
+
+    uint16_t port = 0;
+    int listen_fd = make_listen_socket(&port);
+
+    int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(client_fd, 0);
+    easyio::set_nonblocking(client_fd);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    std::string first_marker = "PIN-ME-0123456789";
+    std::string message = first_marker + std::string(70000 - first_marker.size(), 'z');
+
+    std::string received;
+    std::string pinned_snapshot;
+    std::string pinned_reread;
+    bool pin_was_valid = false;
+
+    run_pair(
+        *queue,
+        pin_recycle_server(
+            *queue, listen_fd, &received, &pinned_snapshot, &pinned_reread, &pin_was_valid),
+        client_send_one(*queue, client_fd, addr, message));
+
+    ASSERT_EQ(received.size(), message.size());
+    EXPECT_EQ(received, message);
+    ASSERT_TRUE(pin_was_valid) << "io_uring multishot recv_stream should support pin_last()";
+    EXPECT_EQ(pinned_reread, pinned_snapshot)
+        << "pinned chunk's memory changed before release() -- its ring slot was recycled early";
     ::close(listen_fd);
 }
 

@@ -32,10 +32,18 @@ void print_usage(const char* argv0) {
         "                           Real deployments should leave this at 1 --\n"
         "                           it exists for isolating O_DIRECT's own effect\n"
         "                           from everything else during benchmarking.\n"
+        "      --recv-ring-entries N       per-connection recv buffer ring slot count\n"
+        "                                  (default: %u). Raise this when benchmarking\n"
+        "                                  the zero-copy write path (io_uring multishot)\n"
+        "                                  at higher iodepth -- a payload pinned until\n"
+        "                                  its disk write completes ties up its slot(s)\n"
+        "                                  far longer than the tiny default assumes.\n"
+        "      --recv-ring-entry-size N    bytes per recv ring slot (default: %zu)\n"
         "  -h, --help               show this help and exit\n"
         "  -v, --version            show version and exit\n",
         argv0, easyio::io_uring_available() ? " (default: io_uring)" : " (only libc: built --without-liburing)",
-        kDefaultQueueDepth);
+        kDefaultQueueDepth, easybd::ServerConfig{}.recv_ring_entries,
+        easybd::ServerConfig{}.recv_ring_entry_size);
 }
 
 // Splits "host:port"; host may not itself contain ':' (no IPv6 support --
@@ -103,6 +111,8 @@ int main(int argc, char** argv) {
         {"threads", required_argument, nullptr, 'j'},
         {"feature-multishot", no_argument, nullptr, 'M'},
         {"direct", required_argument, nullptr, 'D'},
+        {"recv-ring-entries", required_argument, nullptr, 'E'},
+        {"recv-ring-entry-size", required_argument, nullptr, 'S'},
         {"help", no_argument, nullptr, 'h'},
         {"version", no_argument, nullptr, 'v'},
         {nullptr, 0, nullptr, 0},
@@ -139,6 +149,13 @@ int main(int argc, char** argv) {
                 break;
             case 'D':
                 config.direct_io = parse_direct(optarg);
+                break;
+            case 'E':
+                config.recv_ring_entries = static_cast<unsigned int>(std::strtoul(optarg, nullptr, 10));
+                break;
+            case 'S':
+                config.recv_ring_entry_size =
+                    static_cast<size_t>(std::strtoull(optarg, nullptr, 10));
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -185,11 +202,11 @@ int main(int argc, char** argv) {
         std::fprintf(
             stderr,
             "easybd-server: listening on %s:%u, file=%s, backend=%s, threads=%u, depth=%u, "
-            "recv=%s, direct=%d\n",
+            "recv=%s, direct=%d, recv-ring=%ux%zu\n",
             config.bind_host.c_str(), config.bind_port, config.file_path.c_str(),
             std::string(easyio::backend_name(config.backend)).c_str(), config.threads,
             config.queue_depth, config.multishot_recv ? "multishot" : "ordinary",
-            config.direct_io ? 1 : 0);
+            config.direct_io ? 1 : 0, config.recv_ring_entries, config.recv_ring_entry_size);
 
         easybd::run_server(config);
     } catch (const std::exception& e) {
