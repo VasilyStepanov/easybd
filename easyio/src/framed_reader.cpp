@@ -1,5 +1,7 @@
 #include <easyio/framed_reader.hpp>
 
+#include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <system_error>
 
@@ -39,103 +41,52 @@ Task<std::span<const std::byte>> FramedReader::read_exact(size_t n) {
     co_return std::span<const std::byte>(_buf.data(), n);
 }
 
-Task<bool> FramedReader::try_read_exact_zerocopy(
-    size_t n, std::vector<RecvStream::Chunk>& out, std::vector<RecvStream::PinHandle>& pins) {
+Task<void> FramedReader::read_exact_into(void* dest, size_t n) {
     _buf.erase(_buf.begin(), _buf.begin() + static_cast<ptrdiff_t>(_consumed));
     _consumed = 0;
+
+    size_t got = 0;
     if (!_buf.empty()) {
-        // Leftover bytes from a previous read are already sitting here,
-        // copied out of chunks whose ring memory has long since been
-        // returned -- nothing live left to hand back for that portion.
-        co_return false;
+        // Leftover bytes from a previous read's overshoot (see below) --
+        // hand them straight to the caller's buffer instead of re-fetching
+        // them from the stream.
+        got = std::min(_buf.size(), n);
+        std::memcpy(dest, _buf.data(), got);
+        _consumed = got; // erased at the top of the next read_exact*() call
     }
 
-    // Used when backing out after already taking *real* data from the
-    // stream (currently: only the overshoot case below) -- copies
-    // everything gathered into `out` so far, plus batch[from..count) (this
-    // round's chunks that were never added to `out`, e.g. because an
-    // overshoot was detected partway through them), into this reader's
-    // ordinary buffer. That's exactly what a plain read_exact() would
-    // itself have accumulated by this point, so nothing taken here is ever
-    // lost: the caller's read_exact() fallback either needs no further I/O
-    // at all (if this had already gathered all n bytes' worth) or picks up
-    // right where this left off. Only then releases every pin and clears
-    // both output params.
-    auto preserve_and_abandon = [&](const RecvStream::Chunk* batch, size_t from, size_t count) {
-        for (const auto& chunk : out) {
-            _buf.insert(_buf.end(), chunk.data.begin(), chunk.data.end());
-        }
-        for (size_t i = from; i < count; ++i) {
-            _buf.insert(_buf.end(), batch[i].data.begin(), batch[i].data.end());
-        }
-        for (auto& p : pins) {
-            _stream.release(std::move(p));
-        }
-        out.clear();
-        pins.clear();
-    };
-
-    try {
-        size_t total = 0;
-        RecvStream::Chunk batch[kBatchCapacity];
-        while (total < n) {
-            size_t count = co_await _stream.next_batch(batch, n - total);
-            RecvStream::PinHandle pin = _stream.pin_last();
-            if (!pin) {
-                // Can't pin -- unsupported backend, or (per pin_last()'s
-                // doc comment) this round drained no real chunk to begin
-                // with, just an EOF/error sentinel that next round's
-                // read_exact() will see and handle identically. Either
-                // way, nothing real was taken this round, so there's
-                // nothing new to preserve beyond whatever's already in
-                // `out` from earlier rounds.
-                preserve_and_abandon(batch, 0, 0);
-                co_return false;
+    RecvStream::Chunk batch[kBatchCapacity];
+    while (got < n) {
+        size_t count = co_await _stream.next_batch(batch, n - got);
+        for (size_t i = 0; i < count; ++i) {
+            const RecvStream::Chunk& chunk = batch[i];
+            if (chunk.error != 0) {
+                throw std::system_error(-chunk.error, std::generic_category(), "recv");
             }
-            pins.push_back(std::move(pin));
-
-            for (size_t i = 0; i < count; ++i) {
-                const RecvStream::Chunk& chunk = batch[i];
-                if (chunk.error != 0) {
-                    // Caught below. Connection's failing regardless of
-                    // this read's own bookkeeping (handle_connection tears
-                    // down the whole connection on any exception here), so
-                    // there's nothing worth preserving -- see the catch
-                    // block.
-                    throw std::system_error(-chunk.error, std::generic_category(), "recv");
-                }
-                if (chunk.data.empty()) {
-                    throw std::runtime_error("easyio: connection closed mid-message");
-                }
-                if (total + chunk.data.size() > n) {
-                    // This chunk (and, in this same batch, everything
-                    // after it) carries bytes belonging to whatever
-                    // follows this read on the wire -- chunks aren't
-                    // message-aligned, so there's no way to split just the
-                    // part this read needs out of pinned memory. Preserve
-                    // all of it into _buf instead of discarding it.
-                    preserve_and_abandon(batch, i, count);
-                    co_return false;
-                }
-                total += chunk.data.size();
-                out.push_back(chunk);
+            if (chunk.data.empty()) {
+                throw std::runtime_error("easyio: connection closed mid-message");
+            }
+            size_t take = std::min(chunk.data.size(), n - got);
+            std::memcpy(static_cast<std::byte*>(dest) + got, chunk.data.data(), take);
+            got += take;
+            if (take < chunk.data.size()) {
+                // This chunk also carries bytes belonging to whatever
+                // follows this read on the wire (chunks aren't message-
+                // aligned) -- unlike read_exact(), this method has nowhere
+                // else to put them, so stash the remainder in _buf for
+                // whichever read_exact()/read_exact_into() call comes
+                // next, same as read_exact()'s own overshoot handling.
+                // By this point any prior leftover _buf content has
+                // necessarily already been fully drained into `dest`
+                // above (that's the only way this loop could still be
+                // running), so it's safe to fully replace it here --
+                // _consumed must reset to 0 too, since it's now stale
+                // relative to this entirely-fresh content.
+                _buf.assign(chunk.data.begin() + take, chunk.data.end());
+                _consumed = 0;
             }
         }
-    } catch (...) {
-        // A stream error/EOF chunk, or pin_last() itself throwing (see its
-        // doc comment). Unlike the overshoot case above, nothing here is
-        // worth preserving into _buf: the connection is being torn down
-        // either way (handle_connection's read loop ends on any exception
-        // from this call), so nothing will ever come back to read it.
-        for (auto& p : pins) {
-            _stream.release(std::move(p));
-        }
-        out.clear();
-        pins.clear();
-        throw;
     }
-
-    co_return true;
 }
 
 } // namespace easyio

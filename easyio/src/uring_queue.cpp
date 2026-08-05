@@ -239,35 +239,6 @@ Task<size_t> Queue::pwrite_dsync(int fd, const void* buf, size_t size, uint64_t 
     co_return static_cast<size_t>(res);
 }
 
-Task<size_t> Queue::pwritev(int fd, const iovec* iov, int iovcnt, uint64_t offset) {
-    bool fixed = _use_fixed_file(fd);
-    int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
-        io_uring_prep_writev(sqe, fixed ? 0 : fd, iov, static_cast<unsigned int>(iovcnt), offset);
-        if (fixed) {
-            sqe->flags |= IOSQE_FIXED_FILE;
-        }
-    });
-    if (res < 0) {
-        throw_errno(res, "pwritev");
-    }
-    co_return static_cast<size_t>(res);
-}
-
-Task<size_t> Queue::pwritev_dsync(int fd, const iovec* iov, int iovcnt, uint64_t offset) {
-    bool fixed = _use_fixed_file(fd);
-    int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
-        io_uring_prep_writev(sqe, fixed ? 0 : fd, iov, static_cast<unsigned int>(iovcnt), offset);
-        sqe->rw_flags |= RWF_DSYNC;
-        if (fixed) {
-            sqe->flags |= IOSQE_FIXED_FILE;
-        }
-    });
-    if (res < 0) {
-        throw_errno(res, "pwritev_dsync");
-    }
-    co_return static_cast<size_t>(res);
-}
-
 Task<int> Queue::accept(int fd) {
     int res = co_await SqeAwaiter(*this, [&](io_uring_sqe* sqe) {
         io_uring_prep_accept(sqe, fd, nullptr, nullptr, 0);
