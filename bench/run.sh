@@ -4,6 +4,10 @@
 # Use bench/report.sh afterwards to turn one or more --out directories into
 # a comparison table.
 #
+# Nothing here gets built for you -- on a fresh checkout, run bench/build.sh
+# first (or pass --server-bin/--lib-dir/--fio-bin yourself if you already
+# have everything built some other way).
+#
 # Two modes:
 #
 #   --mode easybd   Starts an easybd-server for the given --queue-type/
@@ -88,7 +92,7 @@ threads=4
 max_retries=3
 
 usage() {
-  sed -n '2,64p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,68p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 }
 
