@@ -6,6 +6,8 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <mutex>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -31,6 +33,20 @@ namespace {
 constexpr int kShutdownPollTimeoutMs = 200;
 
 std::atomic<bool> g_shutdown_requested{false};
+
+// Set by worker_main() if a worker thread fails before/during its normal
+// step() loop (e.g. Queue::create() -- io_uring_queue_init() -- failing on
+// some environments/threads but not others). An exception escaping a
+// std::thread's entry function is entirely uncaught -- std::terminate(),
+// no ifs or buts -- so worker_main() catches it itself, stashes it here,
+// and flips g_shutdown_requested so every other worker unwinds cleanly;
+// run_server() then rethrows it after joining, turning what would
+// otherwise be a SIGABRT/coredump into the same clean
+// "easybd-server: <what>" + exit(1) path main() already uses for any
+// other startup failure. First failure wins if more than one thread hits
+// this near-simultaneously; the rest are equivalent/redundant anyway.
+std::mutex g_worker_exception_mutex;
+std::exception_ptr g_worker_exception;
 
 // Deliberately minimal: just flips a flag. Every worker thread (and main)
 // polls it via the timeout on Queue::step()/a sleep loop, rather than the
@@ -172,14 +188,24 @@ easyio::Task<void> accept_loop(
 void worker_main(
     easyio::Backend backend, unsigned int depth, int listen_fd, int file_fd, uint64_t file_size,
     bool multishot_recv) {
-    auto queue = easyio::Queue::create(backend, depth);
-    easyio::spawn(accept_loop(*queue, listen_fd, file_fd, file_size, multishot_recv));
-    // The pending accept (and any in-flight request) stays registered
-    // across these calls -- a timed-out step() just means "nothing happened
-    // in the last kShutdownPollTimeoutMs," not that anything gets
-    // resubmitted or lost.
-    while (!g_shutdown_requested.load(std::memory_order_relaxed)) {
-        queue->step(kShutdownPollTimeoutMs);
+    try {
+        auto queue = easyio::Queue::create(backend, depth);
+        easyio::spawn(accept_loop(*queue, listen_fd, file_fd, file_size, multishot_recv));
+        // The pending accept (and any in-flight request) stays registered
+        // across these calls -- a timed-out step() just means "nothing
+        // happened in the last kShutdownPollTimeoutMs," not that anything
+        // gets resubmitted or lost.
+        while (!g_shutdown_requested.load(std::memory_order_relaxed)) {
+            queue->step(kShutdownPollTimeoutMs);
+        }
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(g_worker_exception_mutex);
+            if (!g_worker_exception) {
+                g_worker_exception = std::current_exception();
+            }
+        }
+        g_shutdown_requested.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -212,6 +238,10 @@ void run_server(const ServerConfig& config) {
 
     ::close(listen_fd);
     ::close(file_fd);
+
+    if (g_worker_exception) {
+        std::rethrow_exception(g_worker_exception);
+    }
 }
 
 } // namespace easybd
