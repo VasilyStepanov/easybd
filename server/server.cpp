@@ -128,36 +128,42 @@ easyio::Task<void> accept_loop(
         int client_fd = 0;
         try {
             client_fd = co_await queue.accept(listen_fd);
-        } catch (const std::system_error& e) {
+        } catch (...) {
             // accept(2)'s BUGS section: a peer that resets a connection
             // after the kernel completes the handshake but before this
             // thread gets around to calling accept4() surfaces as an
             // error here (ECONNABORTED, and in practice sometimes
             // ECONNRESET/EPROTO/ENETDOWN/... depending on the network
             // stack) -- portable code is expected to just try again, not
-            // treat it as the listen socket itself dying. Getting this
-            // wrong doesn't just drop the one connection: since nothing
-            // else ever re-arms accept() on this thread's listen_fd, it
-            // silently and permanently stops this worker from accepting
-            // *any* future connection, while the kernel keeps completing
-            // TCP handshakes into the backlog regardless -- callers see
-            // their connect() succeed and then hang forever with no
-            // application on the other end ever reading anything (found
-            // via a stuck benchmark connection sitting in CLOSE-WAIT with
-            // unread bytes in Recv-Q, and strace confirming this thread's
-            // poll() set had gone completely empty -- not even listen_fd
-            // was still registered). EBADF/EINVAL mean listen_fd itself
-            // is gone (fd closed under us) -- that's the real shutdown
-            // signal this loop should stop on.
-            if (e.code().value() == EBADF || e.code().value() == EINVAL) {
+            // treat it as the listen socket itself dying. The same applies
+            // to any OTHER exception this doesn't specifically catalogue:
+            // guessing "is this fatal" from an exception type/errno and
+            // getting it wrong doesn't just drop the one connection --
+            // since nothing else ever re-arms accept() on this thread's
+            // listen_fd, it silently and permanently stops this worker
+            // from accepting *any* future connection, while the kernel
+            // keeps completing TCP handshakes into the backlog regardless
+            // -- callers see their connect() succeed and then hang
+            // forever with no application on the other end ever reading
+            // anything (found via a stuck benchmark connection with
+            // unread bytes in Recv-Q, and gdb confirming every worker
+            // thread's poll() set had gone completely empty -- not even
+            // listen_fd was still registered on any of them). So instead
+            // of trying to classify the exception, ask the one question
+            // that actually matters: has a real shutdown been requested?
+            // If not, this is retried unconditionally, no matter what it
+            // was. g_shutdown_requested flipping true is what run_server()
+            // uses right before it closes listen_fd out from under every
+            // worker -- checking it directly is a strictly more reliable
+            // signal than trying to infer the same fact from whatever
+            // errno that close happens to surface as here (EBADF/EINVAL in
+            // practice, but that's an implementation detail of what
+            // accept4() on a just-closed fd happens to return, not a
+            // contract).
+            if (g_shutdown_requested.load(std::memory_order_relaxed)) {
                 co_return;
             }
             continue;
-        } catch (...) {
-            // Some other, non-accept()-shaped failure -- not a case the
-            // BUGS-section guidance above covers, so don't assume it's
-            // safe to just retry.
-            co_return;
         }
         easyio::spawn(accept_one(queue, client_fd, file_fd, file_size, multishot_recv));
     }
