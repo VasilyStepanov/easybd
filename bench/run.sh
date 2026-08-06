@@ -149,14 +149,20 @@ maybe_sudo() {
   fi
 }
 
-taskset_maybe() {
-  # taskset_maybe <cpulist> <cmd...> -- runs cmd under taskset only if
-  # cpulist is non-empty, so --client-cpu/--server-cpu are optional.
-  local cpulist=$1; shift
+build_cmd() {
+  # build_cmd <arrayname> <cpulist> <cmd...> -- fills arrayname with
+  # `taskset -c cpulist cmd...` if cpulist is non-empty, else just
+  # `cmd...`. A plain array, not a function, because this command line
+  # ends up as an argument vector to env/timeout/sudo -- those exec(3)
+  # their argv directly, so a shell *function* name placed there (as
+  # opposed to a real binary like taskset) can never be resolved and
+  # fails with "No such file or directory".
+  local -n _build_cmd_out=$1
+  local cpulist=$2; shift 2
   if [[ -n "$cpulist" ]]; then
-    taskset -c "$cpulist" "$@"
+    _build_cmd_out=(taskset -c "$cpulist" "$@")
   else
-    "$@"
+    _build_cmd_out=("$@")
   fi
 }
 
@@ -164,10 +170,11 @@ start_server() {
   local logf="$out/server.log"
   local extra=()
   [[ "$queue_type" == "io_uring" && "$multishot" == "1" ]] && extra+=(--feature-multishot)
-  maybe_sudo env "LD_LIBRARY_PATH=$lib_dir" \
-    taskset_maybe "$server_cpu" \
+  local cmd
+  build_cmd cmd "$server_cpu" \
     "$server_bin" --bind "127.0.0.1:${port}" --file "$file" --queue-type "$queue_type" \
-    --threads "$threads" "${extra[@]}" >"$logf" 2>&1 &
+    --threads "$threads" "${extra[@]}"
+  maybe_sudo env "LD_LIBRARY_PATH=$lib_dir" "${cmd[@]}" >"$logf" 2>&1 &
   disown
   for _ in $(seq 1 20); do
     grep -q "listening on" "$logf" 2>/dev/null && return 0
@@ -184,22 +191,25 @@ stop_server() {
 
 run_one_easybd() {
   local out_json=$1 rw=$2 bs=$3 iodepth=$4 numjobs=$5
-  LD_LIBRARY_PATH="$lib_dir" timeout -k 10 "$timeout_s" \
-    taskset_maybe "$client_cpu" "$fio_bin" \
+  local cmd
+  build_cmd cmd "$client_cpu" "$fio_bin" \
     --name=job --ioengine=easybd --filename="127.0.0.1\\:${port}" \
     --size=1800M --rw="$rw" --bs="$bs" --direct=1 --iodepth="$iodepth" --numjobs="$numjobs" \
     --thread --easybd_queue_type="$queue_type" --easybd_feature_multishot="$multishot" \
     --sync="$sync" --group_reporting --time_based=1 --runtime="$runtime" --ramp_time="$ramp" \
-    --output-format=json --output="$out_json" >"${out_json%.json}.err" 2>&1
+    --output-format=json --output="$out_json"
+  LD_LIBRARY_PATH="$lib_dir" timeout -k 10 "$timeout_s" "${cmd[@]}" >"${out_json%.json}.err" 2>&1
 }
 
 run_one_raw() {
   local out_json=$1 rw=$2 bs=$3 iodepth=$4 numjobs=$5
-  maybe_sudo timeout -k 10 "$timeout_s" taskset_maybe "$client_cpu" "$fio_bin" \
+  local cmd
+  build_cmd cmd "$client_cpu" "$fio_bin" \
     --name=job --ioengine=io_uring --filename="$file" \
     --size=1800M --rw="$rw" --bs="$bs" --direct=1 --sync="$sync" --iodepth="$iodepth" \
     --numjobs="$numjobs" --group_reporting --time_based=1 --runtime="$runtime" \
-    --ramp_time="$ramp" --output-format=json --output="$out_json" >"${out_json%.json}.err" 2>&1
+    --ramp_time="$ramp" --output-format=json --output="$out_json"
+  maybe_sudo timeout -k 10 "$timeout_s" "${cmd[@]}" >"${out_json%.json}.err" 2>&1
 }
 
 n=0
