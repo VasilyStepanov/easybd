@@ -27,8 +27,10 @@
 #                     cloned/built. Left alone (not re-cloned) if it
 #                     already exists -- rerun `git pull` in there yourself
 #                     first if you want a newer easybd_fio.
-#   --fio-repo URL    (default: git@github.com:VasilyStepanov/easybd_fio.git)
-#                      Only used the first time (when cloning --fio-dir).
+#   --fio-repo URL    (default: https://github.com/VasilyStepanov/easybd_fio.git)
+#                      Only used the first time (when cloning --fio-dir). Use
+#                      an https://TOKEN@github.com/... form if the repo is
+#                      private and this machine has no SSH key for GitHub.
 #   --fio-ref REF      git checkout this ref in --fio-dir after cloning
 #                       (default: whatever the clone's default branch is).
 #   --jobs N            (default: nproc) parallel build jobs.
@@ -44,13 +46,13 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
 prefix="$REPO_ROOT/.bench-install"
 fio_dir="$REPO_ROOT/.bench-fio"
-fio_repo="git@github.com:VasilyStepanov/easybd_fio.git"
+fio_repo="https://github.com/VasilyStepanov/easybd_fio.git"
 fio_ref=""
 jobs=$(nproc 2>/dev/null || echo 4)
 skip_fio=0
 
 usage() {
-  sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 1
 }
 
