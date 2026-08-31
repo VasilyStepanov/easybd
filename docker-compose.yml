@@ -1,0 +1,70 @@
+# Two-"machine" benchmarking topology: `server` runs easybd-server against
+# a backing file in a named volume, `client` has fio (with the easybd
+# ioengine, see bench/build.sh) plus bench/run.sh and bench/report.sh, and
+# talks to `server` over the compose network by its service name -- see
+# bench/run.sh's --host/--no-server options.
+#
+# Quick start:
+#   docker compose build
+#   docker compose up -d server
+#   docker compose run --rm client \
+#     bench/run.sh --mode easybd --no-server --host server \
+#       --queue-type io_uring --multishot --sync 0 \
+#       --fio-bin "$EASYBD_FIO_BIN" --lib-dir "$EASYBD_LIB_DIR" \
+#       --out results/io_uring_ms_sync0
+#   docker compose run --rm client \
+#     bench/report.sh mine=results/io_uring_ms_sync0
+#
+# To benchmark a different server-side queue-type/backend combination,
+# recreate `server` with different EASYBD_* env vars (see
+# docker/server-entrypoint.sh), e.g.:
+#   EASYBD_QUEUE_TYPE=libc docker compose up -d --force-recreate server
+#
+# `--fio-bin`/`--lib-dir` above are given as the client image's own
+# EASYBD_FIO_BIN/EASYBD_LIB_DIR env vars (set in docker/client.Dockerfile)
+# rather than hardcoded paths, so they stay correct if the image changes.
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+    environment:
+      EASYBD_BIND: 0.0.0.0:39900
+      EASYBD_FILE: /data/easybd.img
+      EASYBD_FILE_SIZE: 4G
+      EASYBD_QUEUE_TYPE: io_uring
+      EASYBD_MULTISHOT: "0"
+    ports:
+      - "39900:39900"
+    volumes:
+      - easybd-data:/data
+    # io_uring needs its syscalls let through by the container's seccomp
+    # profile; without this, io_uring_queue_init fails with EPERM/ENOSYS on
+    # most current Docker defaults (this was confirmed on this host).
+    security_opt:
+      - seccomp:unconfined
+
+  client:
+    build:
+      context: .
+      dockerfile: docker/client.Dockerfile
+    depends_on:
+      - server
+    volumes:
+      - ./results:/workspace/results
+    # libeasybd itself uses io_uring for its own queue (independent of the
+    # server-side --queue-type), so the client needs the same seccomp
+    # relaxation as the server -- see the comment on that service above.
+    # Without it, connect() fails with a misleading "Operation not
+    # permitted" (io_uring_queue_init's EPERM surfacing through the
+    # client's own connect-failed error path).
+    security_opt:
+      - seccomp:unconfined
+    # Kept alive so `docker compose run --rm client <cmd>` (see quick start
+    # above) has something to attach to; this service is not meant to be
+    # started on its own with `docker compose up client`.
+    command: ["-c", "sleep infinity"]
+
+volumes:
+  easybd-data:

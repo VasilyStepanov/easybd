@@ -46,7 +46,21 @@
 #   --multishot                    io_uring-multishot instead of plain
 #                                   io_uring (only meaningful with
 #                                   --queue-type io_uring).
+#   --host HOST                    (default 127.0.0.1) address the fio client
+#                                    connects to. Only useful with
+#                                    --no-server (see below) -- when this
+#                                    script also owns the server it always
+#                                    runs on the loopback address.
 #   --port N                       (default 39900) TCP port for this server.
+#   --no-server                     Don't start/stop an easybd-server at all
+#                                    -- just run the client-side matrix
+#                                    against an already-running one at
+#                                    --host:--port (e.g. a separate machine
+#                                    or docker-compose service). --file,
+#                                    --server-cpu, --server-bin, --threads
+#                                    and --max-retries are all ignored, and
+#                                    --sudo no longer applies to a server
+#                                    this script never touches.
 #   --server-cpu LIST              (default: unset, no taskset) e.g. "0-3".
 #   --server-bin PATH              (default: <repo>/server/easybd-server)
 #   --lib-dir PATH                 (default: <repo>/client/.libs)
@@ -64,7 +78,9 @@
 # "accept_loop retries any accept() failure"; that fix closes one failure
 # mode but does not fully eliminate the hang). --max-retries works around
 # it by restarting the server and retrying; a job that still times out on
-# every retry is left without a result, which report.sh shows as N/A.
+# every retry is left without a result, which report.sh shows as N/A. This
+# retry loop is unavailable with --no-server (there is no server here to
+# restart), so a hung job just times out once and is left as N/A.
 
 set -u
 
@@ -87,12 +103,14 @@ server_cpu=""
 fio_bin=""
 server_bin="$REPO_ROOT/server/easybd-server"
 lib_dir="$REPO_ROOT/client/.libs"
+host="127.0.0.1"
 port=39900
 threads=4
 max_retries=3
+manage_server=1
 
 usage() {
-  sed -n '2,68p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,75p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 }
 
@@ -112,9 +130,11 @@ while [[ $# -gt 0 ]]; do
     --fio-bin) fio_bin=$2; shift 2 ;;
     --server-bin) server_bin=$2; shift 2 ;;
     --lib-dir) lib_dir=$2; shift 2 ;;
+    --host) host=$2; shift 2 ;;
     --port) port=$2; shift 2 ;;
     --threads) threads=$2; shift 2 ;;
     --max-retries) max_retries=$2; shift 2 ;;
+    --no-server) manage_server=0; shift ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
   esac
@@ -122,7 +142,6 @@ done
 
 [[ -z "$mode" ]] && { echo "--mode is required" >&2; usage; }
 [[ -z "$sync" ]] && { echo "--sync is required" >&2; usage; }
-[[ -z "$file" ]] && { echo "--file is required" >&2; usage; }
 [[ -z "$out" ]] && { echo "--out is required" >&2; usage; }
 if [[ "$mode" == "easybd" ]]; then
   [[ -z "$queue_type" ]] && { echo "--queue-type is required for --mode easybd" >&2; usage; }
@@ -131,8 +150,11 @@ if [[ "$mode" == "easybd" ]]; then
     echo "easybd ioengine compiled in -- not part of this repo)" >&2
     exit 1
   }
+  [[ "$manage_server" == "1" && -z "$file" ]] && { echo "--file is required for --mode easybd unless --no-server" >&2; usage; }
 elif [[ "$mode" == "raw" ]]; then
   fio_bin=${fio_bin:-fio}
+  [[ -z "$file" ]] && { echo "--file is required for --mode raw" >&2; usage; }
+  [[ "$manage_server" == "0" ]] && { echo "--no-server has no effect with --mode raw (there is no server here)" >&2; usage; }
 else
   echo "--mode must be 'easybd' or 'raw'" >&2
   usage
@@ -193,7 +215,7 @@ run_one_easybd() {
   local out_json=$1 rw=$2 bs=$3 iodepth=$4 numjobs=$5
   local cmd
   build_cmd cmd "$client_cpu" "$fio_bin" \
-    --name=job --ioengine=easybd --filename="127.0.0.1\\:${port}" \
+    --name=job --ioengine=easybd --filename="${host}\\:${port}" \
     --size=1800M --rw="$rw" --bs="$bs" --direct=1 --iodepth="$iodepth" --numjobs="$numjobs" \
     --thread --easybd_queue_type="$queue_type" --easybd_feature_multishot="$multishot" \
     --sync="$sync" --group_reporting --time_based=1 --runtime="$runtime" --ramp_time="$ramp" \
@@ -216,7 +238,7 @@ n=0
 total=${#JOBS[@]}
 failed=()
 
-if [[ "$mode" == "easybd" ]]; then
+if [[ "$mode" == "easybd" && "$manage_server" == "1" ]]; then
   start_server || exit 1
 fi
 
@@ -238,7 +260,7 @@ for job in "${JOBS[@]}"; do
     run_one_easybd "$out_json" "$rw" "$bs" "$iodepth" "$numjobs"
     rc=$?
     tries=0
-    while [[ $rc -ne 0 && "$queue_type" == "libc" && $tries -lt $max_retries ]]; do
+    while [[ $rc -ne 0 && "$manage_server" == "1" && "$queue_type" == "libc" && $tries -lt $max_retries ]]; do
       tries=$((tries + 1))
       log "  job failed (rc=$rc), restarting server and retrying ($tries/$max_retries)"
       stop_server
@@ -256,7 +278,7 @@ for job in "${JOBS[@]}"; do
   fi
 done
 
-if [[ "$mode" == "easybd" ]]; then
+if [[ "$mode" == "easybd" && "$manage_server" == "1" ]]; then
   stop_server
 fi
 

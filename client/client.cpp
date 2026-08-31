@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -21,6 +22,30 @@ namespace {
 
 void throw_errno(int err, const char* what) {
     throw std::system_error(err, std::generic_category(), what);
+}
+
+// Accepts either a dotted-decimal literal (checked first, so the common
+// case never touches the resolver) or a hostname -- e.g. a docker-compose
+// service name like "server", which is how the client is meant to reach a
+// server container on the compose network. IPv4 only, matching the rest of
+// this client (and easybd-server's own --bind parsing).
+in_addr resolve_ipv4(const std::string& host) {
+    in_addr addr{};
+    if (::inet_pton(AF_INET, host.c_str(), &addr) == 1) {
+        return addr;
+    }
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* result = nullptr;
+    int gai_err = ::getaddrinfo(host.c_str(), nullptr, &hints, &result);
+    if (gai_err != 0) {
+        throw std::invalid_argument(
+            "easybd: could not resolve host '" + host + "': " + ::gai_strerror(gai_err));
+    }
+    addr = reinterpret_cast<const sockaddr_in*>(result->ai_addr)->sin_addr;
+    ::freeaddrinfo(result);
+    return addr;
 }
 
 // recv_stream() ring sizing: entry_size close to what a single TCP recv
@@ -51,9 +76,11 @@ Client::Client(
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+    try {
+        addr.sin_addr = resolve_ipv4(host);
+    } catch (...) {
         ::close(_fd);
-        throw std::invalid_argument("easybd: invalid host '" + host + "'");
+        throw;
     }
 
     bool connected = false;
