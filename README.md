@@ -68,9 +68,10 @@ eval "$(bench/build.sh)"
 # now sets EASYBD_SERVER_BIN, EASYBD_LIB_DIR, EASYBD_FIO_BIN
 ```
 
-`bench/run.sh` then runs the standard 10-profile job matrix (random 4k
-read/write at qd1 and qd16×1/qd16×8, sequential 4M read/write; see
-`bench/lib.sh`) and saves one JSON result per profile:
+`bench/run.sh` then runs the standard 12-profile job matrix (random 4k
+read/write at qd1 and qd16, each ×1 and ×8 parallel connections,
+sequential 4M read/write; see `bench/lib.sh`) and saves one JSON result
+per profile:
 
 ```
 bench/run.sh --mode easybd --queue-type io_uring --multishot --sync 0 \
@@ -156,7 +157,7 @@ That's it — it builds the images, recreates `server` with the right
 `EASYBD_QUEUE_TYPE`/`EASYBD_MULTISHOT` for each backend, runs the client
 matrix at both sync values against it, and writes
 `results/matrix-<timestamp>/sync{0,1}.md` (plus every combo's raw
-`<job>.json`/`.err` alongside them). Expect roughly 80 minutes at the
+`<job>.json`/`.err` alongside them). Expect roughly 96 minutes at the
 default `--runtime 60 --ramp 20` (6 full matrix runs); pass `--runtime`/
 `--ramp` to shorten that for a quick sanity check, or `--out DIR` to pick
 where results go. See `bench/matrix.sh --help` for the rest.

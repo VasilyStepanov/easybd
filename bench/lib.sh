@@ -5,13 +5,16 @@
 log() { echo "[$(date +%H:%M:%S 2>/dev/null || echo '?')] $*" >&2; }
 
 # The standard profile matrix used for easybd benchmarking: name, rw, bs,
-# iodepth, numjobs. Covers random 4k at qd1/qd16 (single connection and 8
-# pipelined connections) and sequential 4M reads/writes, read and write.
+# iodepth, numjobs. Covers random 4k at qd1/qd16, each with a single
+# connection and with 8 parallel connections, and sequential 4M reads/
+# writes, read and write.
 JOBS=(
   "randread_qd1_nj1   randread 4k 1  1"
+  "randread_qd1_nj8   randread 4k 1  8"
   "randread_qd16_nj1  randread 4k 16 1"
   "randread_qd16_nj8  randread 4k 16 8"
   "randwrite_qd1_nj1  randwrite 4k 1  1"
+  "randwrite_qd1_nj8  randwrite 4k 1  8"
   "randwrite_qd16_nj1 randwrite 4k 16 1"
   "randwrite_qd16_nj8 randwrite 4k 16 8"
   "seq4m_read_nj1  read 4M 4 1"

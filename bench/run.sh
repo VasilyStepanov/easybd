@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs the standard 10-profile fio job matrix (see bench/lib.sh) against one
+# Runs the standard 12-profile fio job matrix (see bench/lib.sh) against one
 # target and saves each job's fio --output-format=json result into --out.
 # Use bench/report.sh afterwards to turn one or more --out directories into
 # a comparison table.

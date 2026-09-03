@@ -32,8 +32,8 @@
 #                          this way).
 #
 # Runtime: 3 backends x 2 sync values = 6 bench/run.sh calls, each running
-# the standard 10-profile matrix -- with the default --runtime 60 --ramp
-# 20 that's roughly 80s/job x 10 jobs x 6 = ~80 minutes total, plus a
+# the standard 12-profile matrix -- with the default --runtime 60 --ramp
+# 20 that's roughly 80s/job x 12 jobs x 6 = ~96 minutes total, plus a
 # `docker compose build` up front unless --skip-build.
 
 set -euo pipefail
