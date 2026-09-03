@@ -147,20 +147,31 @@ also uses io_uring for its own connection, independent of the server's
 
 `bench/matrix.sh` automates the above across every backend x durability
 combination (libc / io_uring / io_uring-multishot, each at `--sync 0` and
-`--sync 1`) and renders the two comparison tables:
+`--sync 1`) and renders the two comparison tables. It runs *inside* the
+client container and has no Docker access of its own, so instead of
+recreating one server over and over, `docker-compose.yml` keeps three
+fixed servers — `server-libc`/`server-io-uring`/`server-io-uring-ms` — up
+concurrently (idle except while its own backend is actually being
+benchmarked), and `matrix.sh` just points at whichever one it's currently
+exercising:
 
 ```
-bench/matrix.sh
+docker compose build
+docker compose run --rm client bench/matrix.sh
 ```
 
-That's it — it builds the images, recreates `server` with the right
-`EASYBD_QUEUE_TYPE`/`EASYBD_MULTISHOT` for each backend, runs the client
-matrix at both sync values against it, and writes
-`results/matrix-<timestamp>/sync{0,1}.md` (plus every combo's raw
-`<job>.json`/`.err` alongside them). Expect roughly 96 minutes at the
+That's it — `client`'s `depends_on` brings up all three servers
+automatically, so this one command (after the one-time `docker compose
+build`) runs the client matrix at both sync values against each backend
+and writes `results/matrix-<timestamp>/sync{0,1}.md` (plus every combo's
+raw `<job>.json`/`.err` alongside them). Expect roughly 96 minutes at the
 default `--runtime 60 --ramp 20` (6 full matrix runs); pass `--runtime`/
 `--ramp` to shorten that for a quick sanity check, or `--out DIR` to pick
 where results go. See `bench/matrix.sh --help` for the rest.
+
+`matrix.sh` doesn't stop the three servers when it's done (again, no
+Docker access from inside the container) — `docker compose down`
+yourself once you're done benchmarking.
 
 - The libc backend has a pre-existing, not-fully-root-caused hang under
   load (see `bench/run.sh`'s doc comment and its `--max-retries` workaround).

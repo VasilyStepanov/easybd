@@ -1,10 +1,11 @@
-# Two-"machine" benchmarking topology: `server` runs easybd-server against
-# a backing file in a named volume, `client` has fio (with the easybd
-# ioengine, see bench/build.sh) plus bench/run.sh and bench/report.sh, and
-# talks to `server` over the compose network by its service name -- see
-# bench/run.sh's --host/--no-server options.
+# Two-"machine" benchmarking topology: a server service (or several, see
+# below) runs easybd-server against a backing file in a named volume,
+# `client` has fio (with the easybd ioengine, see bench/build.sh) plus
+# bench/run.sh, bench/report.sh and bench/matrix.sh, and talks to a server
+# over the compose network by its service name -- see bench/run.sh's
+# --host/--no-server options.
 #
-# Quick start:
+# Ad hoc single run against one backend/durability combination:
 #   docker compose build
 #   docker compose up -d server
 #   docker compose run --rm client \
@@ -21,16 +22,41 @@
 # from a `docker compose run` command line either; the host shell would
 # expand that to empty before docker even sees it.
 #
-# To benchmark a different server-side queue-type/backend combination,
-# recreate `server` with different EASYBD_* env vars (see
-# docker/server-entrypoint.sh), e.g.:
+# To benchmark a different server-side queue-type/backend combination on
+# that same ad hoc `server`, recreate it with different EASYBD_* env vars
+# (see docker/server-entrypoint.sh), e.g.:
 #   EASYBD_QUEUE_TYPE=libc docker compose up -d --force-recreate server
+#
+# Full backend x durability sweep (see bench/matrix.sh): rather than
+# recreating one server over and over -- which would need Docker access
+# from *inside* the client container, since that's where bench/matrix.sh
+# runs -- server-libc/server-io-uring/server-io-uring-ms below stay up
+# concurrently (each is idle except while its own backend is actually
+# being benchmarked), and bench/matrix.sh just points bench/run.sh's
+# --host at whichever one it's currently exercising. `client` depends on
+# all three, so this one command is really all you need (after `docker
+# compose build`, since bench/matrix.sh itself has no Docker access to
+# build anything):
+#   docker compose build
+#   docker compose run --rm client bench/matrix.sh
+# This leaves server-libc/server-io-uring/server-io-uring-ms running
+# afterwards (bench/matrix.sh can't stop them, for the same no-Docker-
+# access reason) -- `docker compose down` once you're done.
+
+x-server: &server
+  build:
+    context: .
+    dockerfile: docker/server.Dockerfile
+  # io_uring needs its syscalls let through by the container's seccomp
+  # profile; without this, io_uring_queue_init fails with EPERM/ENOSYS on
+  # most current Docker defaults (this was confirmed on this host).
+  security_opt:
+    - seccomp:unconfined
 
 services:
+  # Ad hoc single-config server -- see "Ad hoc single run" above.
   server:
-    build:
-      context: .
-      dockerfile: docker/server.Dockerfile
+    <<: *server
     environment:
       EASYBD_BIND: 0.0.0.0:39900
       EASYBD_FILE: /data/easybd.img
@@ -41,26 +67,62 @@ services:
       - "39900:39900"
     volumes:
       - easybd-data:/data
-    # io_uring needs its syscalls let through by the container's seccomp
-    # profile; without this, io_uring_queue_init fails with EPERM/ENOSYS on
-    # most current Docker defaults (this was confirmed on this host).
-    security_opt:
-      - seccomp:unconfined
+
+  # Fixed one-per-backend servers for bench/matrix.sh's sweep -- see "Full
+  # backend x durability sweep" above. Not exposed on a host port: only
+  # ever reached from `client` over the compose network.
+  server-libc:
+    <<: *server
+    environment:
+      EASYBD_BIND: 0.0.0.0:39900
+      EASYBD_FILE: /data/easybd.img
+      EASYBD_FILE_SIZE: 4G
+      EASYBD_QUEUE_TYPE: libc
+      EASYBD_MULTISHOT: "0"
+    volumes:
+      - easybd-data-libc:/data
+
+  server-io-uring:
+    <<: *server
+    environment:
+      EASYBD_BIND: 0.0.0.0:39900
+      EASYBD_FILE: /data/easybd.img
+      EASYBD_FILE_SIZE: 4G
+      EASYBD_QUEUE_TYPE: io_uring
+      EASYBD_MULTISHOT: "0"
+    volumes:
+      - easybd-data-io-uring:/data
+
+  server-io-uring-ms:
+    <<: *server
+    environment:
+      EASYBD_BIND: 0.0.0.0:39900
+      EASYBD_FILE: /data/easybd.img
+      EASYBD_FILE_SIZE: 4G
+      EASYBD_QUEUE_TYPE: io_uring
+      EASYBD_MULTISHOT: "1"
+    volumes:
+      - easybd-data-io-uring-ms:/data
 
   client:
     build:
       context: .
       dockerfile: docker/client.Dockerfile
+    # Only the three matrix servers, not the ad hoc `server` -- that one
+    # stays opt-in (`docker compose up -d server`), matching "Ad hoc
+    # single run" above, so it isn't started as a side effect of every
+    # `docker compose run client ...`.
     depends_on:
-      - server
+      - server-libc
+      - server-io-uring
+      - server-io-uring-ms
     volumes:
       - ./results:/workspace/results
-    # libeasybd itself uses io_uring for its own queue (independent of the
-    # server-side --queue-type), so the client needs the same seccomp
-    # relaxation as the server -- see the comment on that service above.
-    # Without it, connect() fails with a misleading "Operation not
-    # permitted" (io_uring_queue_init's EPERM surfacing through the
-    # client's own connect-failed error path).
+    # libeasybd itself uses io_uring for its own queue (independent of any
+    # server's --queue-type), so the client needs the same seccomp
+    # relaxation as the servers above. Without it, connect() fails with a
+    # misleading "Operation not permitted" (io_uring_queue_init's EPERM
+    # surfacing through the client's own connect-failed error path).
     security_opt:
       - seccomp:unconfined
     # Kept alive so `docker compose run --rm client <cmd>` (see quick start
@@ -70,3 +132,6 @@ services:
 
 volumes:
   easybd-data:
+  easybd-data-libc:
+  easybd-data-io-uring:
+  easybd-data-io-uring-ms:
