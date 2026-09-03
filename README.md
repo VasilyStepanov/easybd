@@ -110,7 +110,6 @@ docker compose up -d server
 docker compose run --rm client \
   bench/run.sh --mode easybd --no-server --host server \
     --queue-type io_uring --multishot --sync 0 \
-    --fio-bin "$EASYBD_FIO_BIN" --lib-dir "$EASYBD_LIB_DIR" \
     --out results/io_uring_ms_sync0
 docker compose run --rm client bench/report.sh mine=results/io_uring_ms_sync0
 ```
@@ -120,6 +119,14 @@ of its own and just run the client-side matrix against the one already
 listening at the `server` compose service (see `bench/run.sh --help`).
 Results land in `./results` on the host (bind-mounted into the client
 container).
+
+No need to pass `--fio-bin`/`--lib-dir`: `bench/run.sh` falls back to
+`$EASYBD_FIO_BIN`/`$EASYBD_LIB_DIR` when they're not given, and
+`docker/client.Dockerfile` already sets those inside the image. Don't try
+to reference them yourself on the `docker compose run` command line either
+(e.g. `--fio-bin "$EASYBD_FIO_BIN"`) — that's your host shell's
+environment, not the container's, so it would just expand to an empty
+string before docker even sees it.
 
 To benchmark a different server-side queue-type/backend combination,
 recreate `server` with different `EASYBD_*` env vars (see

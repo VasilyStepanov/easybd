@@ -35,11 +35,15 @@
 #   --runtime SECONDS     (default 60) fio --runtime.
 #   --ramp SECONDS         (default 20) fio --ramp_time.
 #   --client-cpu LIST      (default: unset, no taskset) e.g. "4-7".
-#   --fio-bin PATH          (default: "fio" from PATH for --mode raw; REQUIRED
-#                             for --mode easybd -- there is no universal
-#                             default because it's a separate fio build with
-#                             the easybd ioengine compiled in, not part of
-#                             this repo)
+#   --fio-bin PATH          (default: "fio" from PATH for --mode raw; for
+#                             --mode easybd, defaults to $EASYBD_FIO_BIN if
+#                             set -- e.g. already exported by `eval
+#                             "$(bench/build.sh)"`, or baked into
+#                             docker/client.Dockerfile's image -- and is
+#                             REQUIRED otherwise, since there is no
+#                             universal default: it's a separate fio build
+#                             with the easybd ioengine compiled in, not
+#                             part of this repo)
 #
 # Options (--mode easybd only):
 #   --queue-type libc|io_uring   required.
@@ -63,9 +67,10 @@
 #                                    this script never touches.
 #   --server-cpu LIST              (default: unset, no taskset) e.g. "0-3".
 #   --server-bin PATH              (default: <repo>/server/easybd-server)
-#   --lib-dir PATH                 (default: <repo>/client/.libs)
-#                                   LD_LIBRARY_PATH for the fio client's
-#                                   easybd ioengine (libeasybd.so).
+#   --lib-dir PATH                 (default: $EASYBD_LIB_DIR if set, else
+#                                   <repo>/client/.libs) LD_LIBRARY_PATH
+#                                   for the fio client's easybd ioengine
+#                                   (libeasybd.so).
 #   --threads N                    (default 4) server --threads.
 #   --max-retries N                 (default 3) on a job timing out, restart
 #                                    the server and retry this many times
@@ -100,9 +105,9 @@ runtime=60
 ramp=20
 client_cpu=""
 server_cpu=""
-fio_bin=""
+fio_bin="${EASYBD_FIO_BIN:-}"
 server_bin="$REPO_ROOT/server/easybd-server"
-lib_dir="$REPO_ROOT/client/.libs"
+lib_dir="${EASYBD_LIB_DIR:-$REPO_ROOT/client/.libs}"
 host="127.0.0.1"
 port=39900
 threads=4
@@ -110,7 +115,7 @@ max_retries=3
 manage_server=1
 
 usage() {
-  sed -n '2,75p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,88p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 }
 

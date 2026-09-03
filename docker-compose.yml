@@ -10,19 +10,21 @@
 #   docker compose run --rm client \
 #     bench/run.sh --mode easybd --no-server --host server \
 #       --queue-type io_uring --multishot --sync 0 \
-#       --fio-bin "$EASYBD_FIO_BIN" --lib-dir "$EASYBD_LIB_DIR" \
 #       --out results/io_uring_ms_sync0
 #   docker compose run --rm client \
 #     bench/report.sh mine=results/io_uring_ms_sync0
+#
+# No need to pass --fio-bin/--lib-dir yourself -- bench/run.sh falls back
+# to $EASYBD_FIO_BIN/$EASYBD_LIB_DIR when they're not given, and those are
+# already set as the client image's own env (see docker/client.Dockerfile)
+# -- NOT your host shell's, so don't try to reference them as "$EASYBD_..."
+# from a `docker compose run` command line either; the host shell would
+# expand that to empty before docker even sees it.
 #
 # To benchmark a different server-side queue-type/backend combination,
 # recreate `server` with different EASYBD_* env vars (see
 # docker/server-entrypoint.sh), e.g.:
 #   EASYBD_QUEUE_TYPE=libc docker compose up -d --force-recreate server
-#
-# `--fio-bin`/`--lib-dir` above are given as the client image's own
-# EASYBD_FIO_BIN/EASYBD_LIB_DIR env vars (set in docker/client.Dockerfile)
-# rather than hardcoded paths, so they stay correct if the image changes.
 
 services:
   server:
