@@ -85,7 +85,10 @@
 # it by restarting the server and retrying; a job that still times out on
 # every retry is left without a result, which report.sh shows as N/A. This
 # retry loop is unavailable with --no-server (there is no server here to
-# restart), so a hung job just times out once and is left as N/A.
+# restart): the first job that fails there is assumed to mean the server
+# is now permanently wedged (not just that one job), so every remaining
+# job in this run is left as N/A without even attempting it, rather than
+# spending a full timeout on each to discover the same thing again.
 
 set -u
 
@@ -115,7 +118,7 @@ max_retries=3
 manage_server=1
 
 usage() {
-  sed -n '2,88p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 }
 
@@ -280,6 +283,23 @@ for job in "${JOBS[@]}"; do
   if [[ $rc -ne 0 ]]; then
     log "  $jname did not complete (rc=$rc) -- report.sh will show N/A"
     failed+=("$jname")
+
+    if [[ "$mode" == "easybd" && "$manage_server" == "0" ]]; then
+      # Unlike the managed-server case above, there is no restart-and-retry
+      # available here -- --no-server means this script never had a handle
+      # on the server to begin with. The libc backend's known hang (see
+      # "Known caveat" above) wedges the *server*, not just this one
+      # client, so every subsequent job would independently time out
+      # against the same broken server for no new information; stop
+      # spending a full --runtime+--ramp+30s timeout on each of them and
+      # mark the rest N/A immediately instead.
+      log "  --no-server: can't restart $host:$port to recover, so skipping the remaining $((total - n)) job(s) instead of timing out on each in turn"
+      for remaining in "${JOBS[@]:$n}"; do
+        read -r rjname _ <<<"$remaining"
+        failed+=("$rjname")
+      done
+      break
+    fi
   fi
 done
 
