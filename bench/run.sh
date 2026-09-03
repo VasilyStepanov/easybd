@@ -227,8 +227,16 @@ run_one_easybd() {
     --size=1800M --rw="$rw" --bs="$bs" --direct=1 --iodepth="$iodepth" --numjobs="$numjobs" \
     --thread --easybd_queue_type="$queue_type" --easybd_feature_multishot="$multishot" \
     --sync="$sync" --group_reporting --time_based=1 --runtime="$runtime" --ramp_time="$ramp" \
-    --output-format=json --output="$out_json"
-  LD_LIBRARY_PATH="$lib_dir" timeout -k 10 "$timeout_s" "${cmd[@]}" >"${out_json%.json}.err" 2>&1
+    --eta-newline=1 --output-format=json --output="$out_json"
+  # fio's JSON result goes straight to $out_json (via --output above); what
+  # lands on stdout/stderr here is just its live progress/ETA output plus
+  # any warnings, so tee-ing it to the console too (in addition to saving
+  # it to the .err file, same as before) is safe -- it never duplicates
+  # the JSON. PIPESTATUS[0], not $?, since this script doesn't set
+  # pipefail and $? after a pipeline is tee's exit status, not fio's.
+  LD_LIBRARY_PATH="$lib_dir" timeout -k 10 "$timeout_s" "${cmd[@]}" 2>&1 \
+    | tee "${out_json%.json}.err"
+  return "${PIPESTATUS[0]}"
 }
 
 run_one_raw() {
@@ -238,8 +246,9 @@ run_one_raw() {
     --name=job --ioengine=io_uring --filename="$file" \
     --size=1800M --rw="$rw" --bs="$bs" --direct=1 --sync="$sync" --iodepth="$iodepth" \
     --numjobs="$numjobs" --group_reporting --time_based=1 --runtime="$runtime" \
-    --ramp_time="$ramp" --output-format=json --output="$out_json"
-  maybe_sudo timeout -k 10 "$timeout_s" "${cmd[@]}" >"${out_json%.json}.err" 2>&1
+    --ramp_time="$ramp" --eta-newline=1 --output-format=json --output="$out_json"
+  maybe_sudo timeout -k 10 "$timeout_s" "${cmd[@]}" 2>&1 | tee "${out_json%.json}.err"
+  return "${PIPESTATUS[0]}"
 }
 
 n=0

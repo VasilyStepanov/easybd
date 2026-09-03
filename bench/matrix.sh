@@ -88,10 +88,15 @@ for backend in "${BACKENDS[@]}"; do
   for sync in 0 1; do
     combo_out="$out/${label}_sync${sync}"
     log "[$label sync=$sync] running matrix against $host -> $combo_out"
+    # bench/run.sh exits nonzero when one or more jobs didn't complete --
+    # an expected, already-handled outcome (report.sh renders those as
+    # N/A), not a reason for this script's own `set -e` to abort the
+    # entire sweep before even reaching the remaining backends/sync
+    # values.
     "$SCRIPT_DIR/run.sh" --mode easybd --no-server --host "$host" \
       --queue-type "$queue_type" "${multishot_flag[@]}" \
       --sync "$sync" --runtime "$runtime" --ramp "$ramp" \
-      --out "$combo_out" "${extra_args[@]}"
+      --out "$combo_out" "${extra_args[@]}" || true
   done
 done
 
