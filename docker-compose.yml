@@ -35,8 +35,8 @@ services:
       EASYBD_BIND: 0.0.0.0:39900
       EASYBD_FILE: /data/easybd.img
       EASYBD_FILE_SIZE: 4G
-      EASYBD_QUEUE_TYPE: io_uring
-      EASYBD_MULTISHOT: "0"
+      EASYBD_QUEUE_TYPE: ${EASYBD_QUEUE_TYPE:-io_uring}
+      EASYBD_MULTISHOT: ${EASYBD_MULTISHOT:-0}
     ports:
       - "39900:39900"
     volumes:

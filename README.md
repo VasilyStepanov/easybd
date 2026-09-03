@@ -142,7 +142,24 @@ Docker's default seccomp profile and both the server and the client (which
 also uses io_uring for its own connection, independent of the server's
 `--queue-type`) fail to connect at all.
 
-## Known caveats
+#### Running the full matrix
+
+`bench/matrix.sh` automates the above across every backend x durability
+combination (libc / io_uring / io_uring-multishot, each at `--sync 0` and
+`--sync 1`) and renders the two comparison tables:
+
+```
+bench/matrix.sh
+```
+
+That's it — it builds the images, recreates `server` with the right
+`EASYBD_QUEUE_TYPE`/`EASYBD_MULTISHOT` for each backend, runs the client
+matrix at both sync values against it, and writes
+`results/matrix-<timestamp>/sync{0,1}.md` (plus every combo's raw
+`<job>.json`/`.err` alongside them). Expect roughly 80 minutes at the
+default `--runtime 60 --ramp 20` (6 full matrix runs); pass `--runtime`/
+`--ramp` to shorten that for a quick sanity check, or `--out DIR` to pick
+where results go. See `bench/matrix.sh --help` for the rest.
 
 - The libc backend has a pre-existing, not-fully-root-caused hang under
   load (see `bench/run.sh`'s doc comment and its `--max-retries` workaround).
