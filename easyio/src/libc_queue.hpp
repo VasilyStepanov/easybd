@@ -63,6 +63,10 @@ public:
 private:
     struct FdState {
         FdOp* read_op = nullptr;
+        // Bumped every time read_op is (re)assigned -- see the comment at
+        // its one read site in step() for why this, not read_op itself, is
+        // what a reentrant on_ready() call must be checked against.
+        uint64_t read_op_gen = 0;
         std::deque<FdOp*> write_queue;
         [[nodiscard]] bool empty() const noexcept { return !read_op && write_queue.empty(); }
     };
