@@ -224,7 +224,11 @@ Queue::~Queue() {
     }
 }
 
-void Queue::_set_read_op(int fd, FdOp* op) { _fds[fd].read_op = op; }
+void Queue::_set_read_op(int fd, FdOp* op) {
+    auto& state = _fds[fd];
+    state.read_op = op;
+    ++state.read_op_gen;
+}
 
 void Queue::_clear_read_op(int fd, FdOp* op) noexcept {
     auto it = _fds.find(fd);
@@ -295,6 +299,7 @@ void Queue::step(int timeout_ms) {
             auto it = _fds.find(pfd.fd);
             if (it != _fds.end() && it->second.read_op) {
                 FdOp* op = it->second.read_op;
+                uint64_t gen = it->second.read_op_gen;
                 // on_ready() resumes a coroutine, which may reentrantly
                 // submit new operations on *other* fds -- e.g. an accept
                 // completing spawns a handler that registers a recv_stream
@@ -302,9 +307,30 @@ void Queue::step(int timeout_ms) {
                 // which can rehash and invalidate `it` (references/pointers
                 // to elements survive a rehash, but iterators don't) -- so
                 // `it` must not be reused afterwards without re-finding it.
+                //
+                // It can also reentrantly re-arm read_op on *this same* fd
+                // -- e.g. accept_loop immediately looping back to await the
+                // next connection on listen_fd after this one. Comparing
+                // read_op_gen (not the FdOp* itself) is what makes the
+                // check below safe against that: a just-finished
+                // Queue::accept() coroutine's frame is heap-allocated and
+                // routinely gets reused by the very next co_await
+                // queue.accept() call before this dispatcher gets to run
+                // its comparison, so a fresh FdOp can end up at the exact
+                // same address as `op` -- a pointer-identity check would
+                // then wrongly conclude nothing changed and null out (and,
+                // via the emptiness check further down, erase) a
+                // freshly-armed registration, permanently orphaning it: the
+                // fd stops being polled at all while the kernel keeps
+                // completing connections/deliveries into it regardless,
+                // which is exactly what live reproduction showed (a
+                // connection sitting ESTABLISHED with unread Recv-Q data,
+                // and every worker's _fds having gone empty -- even
+                // listen_fd's own entry -- despite _set_read_op having just
+                // registered it).
                 if (op->on_ready()) {
                     it = _fds.find(pfd.fd);
-                    if (it != _fds.end() && it->second.read_op == op) {
+                    if (it != _fds.end() && it->second.read_op_gen == gen) {
                         it->second.read_op = nullptr;
                     }
                 }

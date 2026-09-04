@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs the standard 10-profile fio job matrix (see bench/lib.sh) against one
+# Runs the standard 12-profile fio job matrix (see bench/lib.sh) against one
 # target and saves each job's fio --output-format=json result into --out.
 # Use bench/report.sh afterwards to turn one or more --out directories into
 # a comparison table.
@@ -35,23 +35,42 @@
 #   --runtime SECONDS     (default 60) fio --runtime.
 #   --ramp SECONDS         (default 20) fio --ramp_time.
 #   --client-cpu LIST      (default: unset, no taskset) e.g. "4-7".
-#   --fio-bin PATH          (default: "fio" from PATH for --mode raw; REQUIRED
-#                             for --mode easybd -- there is no universal
-#                             default because it's a separate fio build with
-#                             the easybd ioengine compiled in, not part of
-#                             this repo)
+#   --fio-bin PATH          (default: "fio" from PATH for --mode raw; for
+#                             --mode easybd, defaults to $EASYBD_FIO_BIN if
+#                             set -- e.g. already exported by `eval
+#                             "$(bench/build.sh)"`, or baked into
+#                             docker/client.Dockerfile's image -- and is
+#                             REQUIRED otherwise, since there is no
+#                             universal default: it's a separate fio build
+#                             with the easybd ioengine compiled in, not
+#                             part of this repo)
 #
 # Options (--mode easybd only):
 #   --queue-type libc|io_uring   required.
 #   --multishot                    io_uring-multishot instead of plain
 #                                   io_uring (only meaningful with
 #                                   --queue-type io_uring).
+#   --host HOST                    (default 127.0.0.1) address the fio client
+#                                    connects to. Only useful with
+#                                    --no-server (see below) -- when this
+#                                    script also owns the server it always
+#                                    runs on the loopback address.
 #   --port N                       (default 39900) TCP port for this server.
+#   --no-server                     Don't start/stop an easybd-server at all
+#                                    -- just run the client-side matrix
+#                                    against an already-running one at
+#                                    --host:--port (e.g. a separate machine
+#                                    or docker-compose service). --file,
+#                                    --server-cpu, --server-bin, --threads
+#                                    and --max-retries are all ignored, and
+#                                    --sudo no longer applies to a server
+#                                    this script never touches.
 #   --server-cpu LIST              (default: unset, no taskset) e.g. "0-3".
 #   --server-bin PATH              (default: <repo>/server/easybd-server)
-#   --lib-dir PATH                 (default: <repo>/client/.libs)
-#                                   LD_LIBRARY_PATH for the fio client's
-#                                   easybd ioengine (libeasybd.so).
+#   --lib-dir PATH                 (default: $EASYBD_LIB_DIR if set, else
+#                                   <repo>/client/.libs) LD_LIBRARY_PATH
+#                                   for the fio client's easybd ioengine
+#                                   (libeasybd.so).
 #   --threads N                    (default 4) server --threads.
 #   --max-retries N                 (default 3) on a job timing out, restart
 #                                    the server and retry this many times
@@ -64,7 +83,12 @@
 # "accept_loop retries any accept() failure"; that fix closes one failure
 # mode but does not fully eliminate the hang). --max-retries works around
 # it by restarting the server and retrying; a job that still times out on
-# every retry is left without a result, which report.sh shows as N/A.
+# every retry is left without a result, which report.sh shows as N/A. This
+# retry loop is unavailable with --no-server (there is no server here to
+# restart): the first job that fails there is assumed to mean the server
+# is now permanently wedged (not just that one job), so every remaining
+# job in this run is left as N/A without even attempting it, rather than
+# spending a full timeout on each to discover the same thing again.
 
 set -u
 
@@ -84,15 +108,17 @@ runtime=60
 ramp=20
 client_cpu=""
 server_cpu=""
-fio_bin=""
+fio_bin="${EASYBD_FIO_BIN:-}"
 server_bin="$REPO_ROOT/server/easybd-server"
-lib_dir="$REPO_ROOT/client/.libs"
+lib_dir="${EASYBD_LIB_DIR:-$REPO_ROOT/client/.libs}"
+host="127.0.0.1"
 port=39900
 threads=4
 max_retries=3
+manage_server=1
 
 usage() {
-  sed -n '2,68p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 }
 
@@ -112,9 +138,11 @@ while [[ $# -gt 0 ]]; do
     --fio-bin) fio_bin=$2; shift 2 ;;
     --server-bin) server_bin=$2; shift 2 ;;
     --lib-dir) lib_dir=$2; shift 2 ;;
+    --host) host=$2; shift 2 ;;
     --port) port=$2; shift 2 ;;
     --threads) threads=$2; shift 2 ;;
     --max-retries) max_retries=$2; shift 2 ;;
+    --no-server) manage_server=0; shift ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
   esac
@@ -122,7 +150,6 @@ done
 
 [[ -z "$mode" ]] && { echo "--mode is required" >&2; usage; }
 [[ -z "$sync" ]] && { echo "--sync is required" >&2; usage; }
-[[ -z "$file" ]] && { echo "--file is required" >&2; usage; }
 [[ -z "$out" ]] && { echo "--out is required" >&2; usage; }
 if [[ "$mode" == "easybd" ]]; then
   [[ -z "$queue_type" ]] && { echo "--queue-type is required for --mode easybd" >&2; usage; }
@@ -131,8 +158,11 @@ if [[ "$mode" == "easybd" ]]; then
     echo "easybd ioengine compiled in -- not part of this repo)" >&2
     exit 1
   }
+  [[ "$manage_server" == "1" && -z "$file" ]] && { echo "--file is required for --mode easybd unless --no-server" >&2; usage; }
 elif [[ "$mode" == "raw" ]]; then
   fio_bin=${fio_bin:-fio}
+  [[ -z "$file" ]] && { echo "--file is required for --mode raw" >&2; usage; }
+  [[ "$manage_server" == "0" ]] && { echo "--no-server has no effect with --mode raw (there is no server here)" >&2; usage; }
 else
   echo "--mode must be 'easybd' or 'raw'" >&2
   usage
@@ -193,12 +223,24 @@ run_one_easybd() {
   local out_json=$1 rw=$2 bs=$3 iodepth=$4 numjobs=$5
   local cmd
   build_cmd cmd "$client_cpu" "$fio_bin" \
-    --name=job --ioengine=easybd --filename="127.0.0.1\\:${port}" \
+    --name=job --ioengine=easybd --filename="${host}\\:${port}" \
     --size=1800M --rw="$rw" --bs="$bs" --direct=1 --iodepth="$iodepth" --numjobs="$numjobs" \
     --thread --easybd_queue_type="$queue_type" --easybd_feature_multishot="$multishot" \
     --sync="$sync" --group_reporting --time_based=1 --runtime="$runtime" --ramp_time="$ramp" \
-    --output-format=json --output="$out_json"
-  LD_LIBRARY_PATH="$lib_dir" timeout -k 10 "$timeout_s" "${cmd[@]}" >"${out_json%.json}.err" 2>&1
+    --eta=always --eta-newline=1 --output-format=json --output="$out_json"
+  # fio's JSON result goes straight to $out_json (via --output above); what
+  # lands on stdout/stderr here is just its live progress/ETA output plus
+  # any warnings, so tee-ing it to the console too (in addition to saving
+  # it to the .err file, same as before) is safe -- it never duplicates
+  # the JSON. --eta=always overrides fio's own default (--eta=auto), which
+  # suppresses the periodic status line entirely once stdout isn't a
+  # terminal -- true the moment it's piped into tee below, so without this
+  # nothing would ever show up live no matter what --eta-newline says.
+  # PIPESTATUS[0], not $?, since this script doesn't set pipefail and $?
+  # after a pipeline is tee's exit status, not fio's.
+  LD_LIBRARY_PATH="$lib_dir" timeout -k 10 "$timeout_s" "${cmd[@]}" 2>&1 \
+    | tee "${out_json%.json}.err"
+  return "${PIPESTATUS[0]}"
 }
 
 run_one_raw() {
@@ -208,15 +250,16 @@ run_one_raw() {
     --name=job --ioengine=io_uring --filename="$file" \
     --size=1800M --rw="$rw" --bs="$bs" --direct=1 --sync="$sync" --iodepth="$iodepth" \
     --numjobs="$numjobs" --group_reporting --time_based=1 --runtime="$runtime" \
-    --ramp_time="$ramp" --output-format=json --output="$out_json"
-  maybe_sudo timeout -k 10 "$timeout_s" "${cmd[@]}" >"${out_json%.json}.err" 2>&1
+    --ramp_time="$ramp" --eta-newline=1 --output-format=json --output="$out_json"
+  maybe_sudo timeout -k 10 "$timeout_s" "${cmd[@]}" 2>&1 | tee "${out_json%.json}.err"
+  return "${PIPESTATUS[0]}"
 }
 
 n=0
 total=${#JOBS[@]}
 failed=()
 
-if [[ "$mode" == "easybd" ]]; then
+if [[ "$mode" == "easybd" && "$manage_server" == "1" ]]; then
   start_server || exit 1
 fi
 
@@ -238,7 +281,7 @@ for job in "${JOBS[@]}"; do
     run_one_easybd "$out_json" "$rw" "$bs" "$iodepth" "$numjobs"
     rc=$?
     tries=0
-    while [[ $rc -ne 0 && "$queue_type" == "libc" && $tries -lt $max_retries ]]; do
+    while [[ $rc -ne 0 && "$manage_server" == "1" && "$queue_type" == "libc" && $tries -lt $max_retries ]]; do
       tries=$((tries + 1))
       log "  job failed (rc=$rc), restarting server and retrying ($tries/$max_retries)"
       stop_server
@@ -253,10 +296,27 @@ for job in "${JOBS[@]}"; do
   if [[ $rc -ne 0 ]]; then
     log "  $jname did not complete (rc=$rc) -- report.sh will show N/A"
     failed+=("$jname")
+
+    if [[ "$mode" == "easybd" && "$manage_server" == "0" ]]; then
+      # Unlike the managed-server case above, there is no restart-and-retry
+      # available here -- --no-server means this script never had a handle
+      # on the server to begin with. The libc backend's known hang (see
+      # "Known caveat" above) wedges the *server*, not just this one
+      # client, so every subsequent job would independently time out
+      # against the same broken server for no new information; stop
+      # spending a full --runtime+--ramp+30s timeout on each of them and
+      # mark the rest N/A immediately instead.
+      log "  --no-server: can't restart $host:$port to recover, so skipping the remaining $((total - n)) job(s) instead of timing out on each in turn"
+      for remaining in "${JOBS[@]:$n}"; do
+        read -r rjname _ <<<"$remaining"
+        failed+=("$rjname")
+      done
+      break
+    fi
   fi
 done
 
-if [[ "$mode" == "easybd" ]]; then
+if [[ "$mode" == "easybd" && "$manage_server" == "1" ]]; then
   stop_server
 fi
 
